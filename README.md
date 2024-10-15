@@ -29,3 +29,5 @@ The GUI/headless should be as simple as:
 - Test influencing the trained/fine-tuned model 
 - Export model & zipped dataset OR Export condensed model & zipped dataset
 #### That's it! Planned to be simple as that! 🎉
+
+- Another Goal of this it to have it automatically be able to work on cpu and GPU, auto-selecting to whichever one is avalible
