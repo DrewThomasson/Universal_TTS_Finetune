@@ -13,6 +13,7 @@ Attempt at making a universal script for fine-tuning a wide variety of tts model
 - [ljspeech dataset generator(Uses whisper for transcription?)](https://github.com/davidmartinrius/speech-dataset-generator)
 - [DeepFilterNet2 for high quality denoising training data](https://github.com/Rikorose/DeepFilterNet)
 - [Styletts2 fine tuning](https://github.com/yl4579/StyleTTS2/discussions/144)
+- [more styletts2 training](https://dagshub.com/blog/styletts2/)
 The GUI/headless should be as simple as:
 - [On training piper-tts](https://github.com/rhasspy/piper/blob/master/TRAINING.md)
 - Good news! They all appear to use LJSpeech FORMAT! Even the standard Piper-tts training code!
