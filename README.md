@@ -14,6 +14,7 @@ Attempt at making a universal script for fine-tuning a wide variety of tts model
 - [DeepFilterNet2 for high quality denoising training data](https://github.com/Rikorose/DeepFilterNet)
 - [Styletts2 fine tuning](https://github.com/yl4579/StyleTTS2/discussions/144)
 - [more styletts2 training](https://dagshub.com/blog/styletts2/)
+- [styletts2 finetuning google colab](https://colab.research.google.com/github/yl4579/StyleTTS2/blob/main/Colab/StyleTTS2_Finetune_Demo.ipynb)
 The GUI/headless should be as simple as:
 - [On training piper-tts](https://github.com/rhasspy/piper/blob/master/TRAINING.md)
 - Good news! They all appear to use LJSpeech FORMAT! Even the standard Piper-tts training code!
