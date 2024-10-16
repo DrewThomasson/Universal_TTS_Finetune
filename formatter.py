@@ -16,8 +16,6 @@ from TTS.tts.layers.xtts.tokenizer import multilingual_cleaners
 torch.set_num_threads(16)
 
 
-import os
-
 audio_types = (".wav", ".mp3", ".flac")
 
 
@@ -46,13 +44,13 @@ def list_files(basePath, validExts=None, contains=None):
 
 def format_audio_list(audio_files, target_language="en", out_path=None, buffer=0.2, eval_percentage=0.15, speaker_name="coqui", gradio_progress=None):
     audio_total_size = 0
-    # make sure that ooutput file exists
+    # make sure that output file exists
     os.makedirs(out_path, exist_ok=True)
 
     # Loading Whisper
     device = "cuda" if torch.cuda.is_available() else "cpu" 
     compute_type = "float16" if device == "cuda" else "int8"
-    print(f"Becuase Device is : {device}, compute type selected is : {compute_type}")
+    print(f"Because Device is : {device}, compute type selected is : {compute_type}")
 
     print("Loading Whisper Model!")
     asr_model = WhisperModel("large-v2", device=device, compute_type=compute_type)
@@ -89,13 +87,13 @@ def format_audio_list(audio_files, target_language="en", out_path=None, buffer=0
         for word_idx, word in enumerate(words_list):
             if first_word:
                 sentence_start = word.start
-                # If it is the first sentence, add buffer or get the begining of the file
+                # If it is the first sentence, add buffer or get the beginning of the file
                 if word_idx == 0:
                     sentence_start = max(sentence_start - buffer, 0)  # Add buffer to the sentence start
                 else:
                     # get previous sentence end
                     previous_word_end = words_list[word_idx - 1].end
-                    # add buffer or get the silence midle between the previous sentence and the current one
+                    # add buffer or get the silence middle between the previous sentence and the current one
                     sentence_start = max(sentence_start - buffer, (previous_word_end + sentence_start)/2)
 
                 sentence = word.word
@@ -109,7 +107,7 @@ def format_audio_list(audio_files, target_language="en", out_path=None, buffer=0
                 sentence = multilingual_cleaners(sentence, target_language)
                 audio_file_name, _ = os.path.splitext(os.path.basename(audio_path))
 
-                audio_file = f"wavs/{audio_file_name}_{str(i).zfill(8)}.wav"
+                audio_file = f"{audio_file_name}_{str(i).zfill(8)}"
 
                 # Check for the next word's existence
                 if word_idx + 1 < len(words_list):
@@ -121,7 +119,7 @@ def format_audio_list(audio_files, target_language="en", out_path=None, buffer=0
                 # Average the current word end and next word start
                 word_end = min((word.end + next_word_start) / 2, word.end + buffer)
                 
-                absoulte_path = os.path.join(out_path, audio_file)
+                absoulte_path = os.path.join(out_path, "wavs", f"{audio_file}.wav")
                 os.makedirs(os.path.dirname(absoulte_path), exist_ok=True)
                 i += 1
                 first_word = True
