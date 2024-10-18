@@ -1,6 +1,33 @@
 # Universal_TTS_Finetune
 Attempt at making a universal script for fine-tuning a wide variety of tts models with a single command
 
+# Confirmed working ljspeech dataset recipies from coqui tts
+
+- [ ] align_tts  
+- [ ] delightful_tts  
+- [ ] fast_pitch  
+- [ ] fast_speech  
+- [ ] fastspeech2  
+- [ ] glow_tts  
+- [ ] hifigan  
+- [ ] multiband_melgan  
+- [ ] neuralhmm_tts  
+- [ ] overflow  
+- [ ] speedy_speech  
+- [ ] tacotron2-Capacitron  
+- [ ] tacotron2-DCA  
+- [ ] tacotron2-DDC  
+- [ ] univnet  
+- [ ] vits_tts  
+- [ ] wavegrad  
+- [ ] wavernn  
+- [ ] xtts_v1  
+- [ ] xtts_v2  
+
+
+
+
+
 
 ## Extra Overkill for training models and such (All supported Coqio tts models and piper-tts in one easy command) 
 - For info about this @DrewThomasson, he is currently working on the development of this, [work-in-progress-repo here](https://github.com/DrewThomasson/Universal_TTS_Finetune)
