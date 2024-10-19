@@ -61,3 +61,16 @@ The GUI/headless should be as simple as:
 #### That's it! Planned to be simple as that! 🎉
 
 - Another Goal of this it to have it automatically be able to work on cpu and GPU, auto-selecting to whichever one is avalible
+
+
+# Dataset creater checklist
+
+- [x] modify formatter.py
+- [ ] modify gradio gui to function with the new formatter.py and make all the output files into the datset folder
+- [ ] metadata_shuf.csv
+- [ ] metadata_train.csv
+- [ ] metadata_val.csv
+- [ ] metadata.csv
+- [ ] rename the dataset folder to LJSpeech-1.1
+- [ ] remove extra unessisary parts of gradio gui
+
