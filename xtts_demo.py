@@ -66,9 +66,17 @@ def preprocess_dataset(audio_files, audio_dir, transcript_file, language, whispe
         message = (
             f"Dataset ready with {result['created_sample_count']} samples at {result['dataset_dir']}"
         )
-        return message, result["dataset_dir"], result["metadata_train"], result["metadata_val"], result["reference_wav"]
+        return (
+            message,
+            result["dataset_dir"],
+            result["metadata_train"],
+            result["metadata_val"],
+            result["reference_wav"],
+            result["dataset_dir"],
+            result["reference_wav"],
+        )
     except Exception as exc:
-        return format_exception(exc), "", "", "", ""
+        return format_exception(exc), "", "", "", "", "", ""
 
 
 
@@ -96,9 +104,12 @@ def run_training(model_key, dataset_dir, language, num_epochs, batch_size, grad_
             result["checkpoint"],
             result["config"],
             result.get("reference_wav", ""),
+            result["artifacts_file"],
+            result.get("reference_wav", ""),
+            model_key,
         )
     except Exception as exc:
-        return format_exception(exc), "", "", "", "", ""
+        return format_exception(exc), "", "", "", "", "", "", "", model_key
 
 
 
@@ -112,9 +123,12 @@ def locate_artifacts(out_path, model_key):
             artifacts["checkpoint"],
             artifacts["config"],
             artifacts.get("reference_wav", ""),
+            artifacts["artifacts_file"],
+            artifacts.get("reference_wav", ""),
+            artifacts["model_key"],
         )
     except Exception as exc:
-        return format_exception(exc), "", "", "", "", ""
+        return format_exception(exc), "", "", "", "", "", "", "", model_key
 
 
 
@@ -128,9 +142,10 @@ def inspect_artifacts(artifacts_path, model_key):
             artifacts["checkpoint"],
             artifacts["config"],
             artifacts.get("reference_wav", ""),
+            artifacts.get("reference_wav", ""),
         )
     except Exception as exc:
-        return format_exception(exc), "", "", "", "", ""
+        return format_exception(exc), "", "", "", "", "", ""
 
 
 
@@ -223,35 +238,26 @@ if __name__ == "__main__":
         prepare_btn.click(
             fn=preprocess_dataset,
             inputs=[audio_upload, audio_dir, transcript_file, language, whisper_model, out_path],
-            outputs=[dataset_status, dataset_dir, train_csv, val_csv, dataset_reference],
+            outputs=[dataset_status, dataset_dir, train_csv, val_csv, dataset_reference, train_dataset_dir, speaker_reference_audio],
         )
-        prepare_btn.click(fn=lambda path: path, inputs=[dataset_dir], outputs=[train_dataset_dir])
-        prepare_btn.click(fn=lambda path: path, inputs=[dataset_reference], outputs=[speaker_reference_audio])
 
         train_btn.click(
             fn=run_training,
             inputs=[model_key, train_dataset_dir, train_language, num_epochs, batch_size, grad_accum, out_path, max_audio_length, restore_path, use_pretrained, extra_overrides_json],
-            outputs=[train_status, training_root, artifacts_file, checkpoint_path, config_path, trained_reference],
+            outputs=[train_status, training_root, artifacts_file, checkpoint_path, config_path, trained_reference, infer_artifacts, speaker_reference_audio, infer_model_key],
         )
-        train_btn.click(fn=lambda path: path, inputs=[artifacts_file], outputs=[infer_artifacts])
-        train_btn.click(fn=lambda path: path, inputs=[trained_reference], outputs=[speaker_reference_audio])
-        train_btn.click(fn=lambda key: key, inputs=[model_key], outputs=[infer_model_key])
 
         latest_btn.click(
             fn=locate_artifacts,
             inputs=[out_path, model_key],
-            outputs=[train_status, training_root, artifacts_file, checkpoint_path, config_path, trained_reference],
+            outputs=[train_status, training_root, artifacts_file, checkpoint_path, config_path, trained_reference, infer_artifacts, speaker_reference_audio, infer_model_key],
         )
-        latest_btn.click(fn=lambda path: path, inputs=[artifacts_file], outputs=[infer_artifacts])
-        latest_btn.click(fn=lambda path: path, inputs=[trained_reference], outputs=[speaker_reference_audio])
-        latest_btn.click(fn=lambda key: key, inputs=[model_key], outputs=[infer_model_key])
 
         inspect_btn.click(
             fn=inspect_artifacts,
             inputs=[infer_artifacts, infer_model_key],
-            outputs=[infer_status, training_root, artifacts_file, checkpoint_path, config_path, trained_reference],
+            outputs=[infer_status, training_root, artifacts_file, checkpoint_path, config_path, trained_reference, speaker_reference_audio],
         )
-        inspect_btn.click(fn=lambda path: path, inputs=[trained_reference], outputs=[speaker_reference_audio])
 
         tts_btn.click(
             fn=run_inference,
