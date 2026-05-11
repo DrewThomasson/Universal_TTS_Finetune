@@ -88,10 +88,12 @@ def _resolve_user_path(
     must_exist: bool = False,
     expect_directory: bool | None = None,
 ) -> Path:
-    candidate = Path(str(value)).expanduser()
-    raw_value = str(candidate)
+    raw_value = str(value).strip()
     if "\x00" in raw_value:
         raise ValueError("Path values cannot contain null bytes.")
+    if not re.fullmatch(r"[\w\s./:\\-]+", raw_value):
+        raise ValueError(f"Unsupported characters in path: {raw_value!r}")
+    candidate = Path(raw_value).expanduser()
     try:
         resolved = candidate.resolve(strict=must_exist)
     except FileNotFoundError:
@@ -249,6 +251,13 @@ def _clean_text(text: str, language: str) -> str:
         return text
 
 
+def _extract_transcribed_words(segments: Sequence[Any]) -> list[Any]:
+    words: list[Any] = []
+    for segment in segments:
+        words.extend(getattr(segment, "words", None) or [])
+    return words
+
+
 def _write_metadata_files(
     entries: list[dict[str, Any]],
     dataset_dir: Path,
@@ -369,7 +378,7 @@ def prepare_dataset(
             vad_filter=True,
             word_timestamps=True,
         )
-        words = [word for segment in segments for word in (getattr(segment, "words", None) or [])]
+        words = _extract_transcribed_words(segments)
         if not words:
             raise ValueError(f"Whisper did not return timestamped words for {audio_path.name}")
 
@@ -574,7 +583,10 @@ def _pick_reference_wav(dataset_dir: Path, dataset_info: dict[str, Any]) -> str:
 
 
 def _optimize_xtts_checkpoint(source_path: Path, destination_path: Path) -> None:
-    checkpoint = torch.load(str(source_path), map_location=torch.device("cpu"))
+    try:
+        checkpoint = torch.load(str(source_path), map_location=torch.device("cpu"), weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(str(source_path), map_location=torch.device("cpu"))
     checkpoint.pop("optimizer", None)
     model_state = checkpoint.get("model", {})
     for key in list(model_state):
@@ -737,12 +749,14 @@ def train_model(
         capture_output=True,
         text=True,
     )
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
     log_path = training_root / "training.log"
-    log_path.write_text((result.stdout or "") + "\n" + (result.stderr or ""), encoding="utf-8")
+    log_path.write_text(stdout + "\n" + stderr, encoding="utf-8")
     if result.returncode != 0:
         raise RuntimeError(
             f"Training failed for {spec.label}. See {log_path}\n\n"
-            f"STDOUT:\n{result.stdout[-ERROR_LOG_TAIL_CHARS:]}\n\nSTDERR:\n{result.stderr[-ERROR_LOG_TAIL_CHARS:]}"
+            f"STDOUT:\n{stdout[-ERROR_LOG_TAIL_CHARS:]}\n\nSTDERR:\n{stderr[-ERROR_LOG_TAIL_CHARS:]}"
         )
     artifacts = _finalize_training_artifacts(
         spec_key=model_key,
