@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import json
-import os
 import random
 import re
 import shutil
@@ -12,7 +11,7 @@ import time
 import traceback
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Sequence
 
 import soundfile as sf
 import torch
@@ -23,7 +22,7 @@ from TTS.tts.configs.xtts_config import XttsConfig
 from TTS.tts.models.xtts import Xtts
 from TTS.utils.manage import ModelManager
 
-from utils.model_registry import MODEL_SPECS, REPO_ROOT, get_model_spec, list_model_choices
+from utils.model_registry import MODEL_SPECS, get_model_spec, list_model_choices
 from utils.tokenizer import multilingual_cleaners
 
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".m4a", ".ogg"}
@@ -32,6 +31,8 @@ DEFAULT_EVAL_PERCENTAGE = 0.15
 DEFAULT_MIN_SEGMENT_SECONDS = 0.5
 DEFAULT_MAX_SEGMENT_SECONDS = 12.0
 DEFAULT_SEGMENT_BUFFER_SECONDS = 0.2
+DEFAULT_SHUFFLE_SEED = 0
+ERROR_LOG_TAIL_CHARS = 4000
 PUNCTUATION_ENDINGS = (".", "!", "?", "。", "！", "？")
 MODEL_CACHE: dict[str, Any] = {}
 
@@ -81,12 +82,33 @@ def _coerce_path(value: Any) -> str | None:
     return None
 
 
+def _resolve_user_path(
+    value: str | Path,
+    *,
+    must_exist: bool = False,
+    expect_directory: bool | None = None,
+) -> Path:
+    candidate = Path(str(value)).expanduser()
+    raw_value = str(candidate)
+    if "\x00" in raw_value:
+        raise ValueError("Path values cannot contain null bytes.")
+    try:
+        resolved = candidate.resolve(strict=must_exist)
+    except FileNotFoundError:
+        raise
+    if must_exist and not resolved.exists():
+        raise FileNotFoundError(f"Path not found: {resolved}")
+    if expect_directory is True and resolved.exists() and not resolved.is_dir():
+        raise NotADirectoryError(f"Expected a directory path but received: {resolved}")
+    if expect_directory is False and resolved.exists() and not resolved.is_file():
+        raise FileNotFoundError(f"Expected a file path but received: {resolved}")
+    return resolved
+
+
 def resolve_audio_files(audio_files: Sequence[Any] | None = None, audio_dir: str | None = None) -> list[str]:
     resolved: list[str] = []
     if audio_dir:
-        directory = Path(audio_dir).expanduser().resolve()
-        if not directory.exists():
-            raise FileNotFoundError(f"Audio directory not found: {directory}")
+        directory = _resolve_user_path(audio_dir, must_exist=True, expect_directory=True)
         for path in sorted(directory.rglob("*")):
             if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS:
                 resolved.append(str(path))
@@ -94,7 +116,7 @@ def resolve_audio_files(audio_files: Sequence[Any] | None = None, audio_dir: str
         candidate = _coerce_path(item)
         if not candidate:
             continue
-        path = Path(candidate).expanduser().resolve()
+        path = _resolve_user_path(candidate, must_exist=True, expect_directory=False)
         if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS:
             resolved.append(str(path))
     deduplicated = []
@@ -138,9 +160,7 @@ def _save_waveform(destination: Path, waveform: torch.Tensor, sample_rate: int) 
 def _load_transcript_map(transcript_file: str | None) -> dict[str, str]:
     if not transcript_file:
         return {}
-    path = Path(transcript_file).expanduser().resolve()
-    if not path.exists():
-        raise FileNotFoundError(f"Transcript file not found: {path}")
+    path = _resolve_user_path(transcript_file, must_exist=True, expect_directory=False)
     suffix = path.suffix.lower()
     mapping: dict[str, str] = {}
     if suffix == ".json":
@@ -229,7 +249,12 @@ def _clean_text(text: str, language: str) -> str:
         return text
 
 
-def _write_metadata_files(entries: list[dict[str, Any]], dataset_dir: Path, eval_percentage: float) -> dict[str, str]:
+def _write_metadata_files(
+    entries: list[dict[str, Any]],
+    dataset_dir: Path,
+    eval_percentage: float,
+    shuffle_seed: int,
+) -> dict[str, str]:
     metadata_path = dataset_dir / "metadata.csv"
     shuffled_path = dataset_dir / "metadata_shuf.csv"
     train_path = dataset_dir / "metadata_train.csv"
@@ -239,7 +264,7 @@ def _write_metadata_files(entries: list[dict[str, Any]], dataset_dir: Path, eval
     metadata_path.write_text("\n".join(rows) + ("\n" if rows else ""), encoding="utf-8")
 
     shuffled_entries = list(entries)
-    random.Random(0).shuffle(shuffled_entries)
+    random.Random(shuffle_seed).shuffle(shuffled_entries)
     shuffled_rows = [f"{item['id']}|{item['text']}|{item['original_text']}" for item in shuffled_entries]
     shuffled_path.write_text("\n".join(shuffled_rows) + ("\n" if shuffled_rows else ""), encoding="utf-8")
 
@@ -274,6 +299,7 @@ def prepare_dataset(
     language: str = "en",
     whisper_model_name: str = "small",
     eval_percentage: float = DEFAULT_EVAL_PERCENTAGE,
+    shuffle_seed: int = DEFAULT_SHUFFLE_SEED,
     min_segment_seconds: float = DEFAULT_MIN_SEGMENT_SECONDS,
     max_segment_seconds: float = DEFAULT_MAX_SEGMENT_SECONDS,
     segment_buffer_seconds: float = DEFAULT_SEGMENT_BUFFER_SECONDS,
@@ -283,7 +309,7 @@ def prepare_dataset(
     if not resolved_audio_files:
         raise ValueError("No audio files found. Provide files directly or point to a folder that contains audio.")
 
-    output_root_path = Path(output_root).expanduser().resolve()
+    output_root_path = _resolve_user_path(output_root, expect_directory=True)
     dataset_dir = output_root_path / "dataset" / "LJSpeech-1.1"
     wavs_dir = dataset_dir / "wavs"
     if dataset_dir.exists():
@@ -295,7 +321,7 @@ def prepare_dataset(
     asr_model: WhisperModel | None = None
     if use_whisper:
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        compute_type = "float16" if torch.cuda.is_available() else "int8"
+        compute_type = "float16" if torch.cuda.is_available() else "float32"
         _notify(progress, f"Loading Whisper model '{whisper_model_name}' on {device}...")
         asr_model = WhisperModel(whisper_model_name, device=device, compute_type=compute_type)
 
@@ -391,7 +417,7 @@ def prepare_dataset(
     if not entries:
         raise ValueError("No usable training samples were created from the provided audio.")
 
-    metadata_files = _write_metadata_files(entries, dataset_dir, eval_percentage)
+    metadata_files = _write_metadata_files(entries, dataset_dir, eval_percentage, shuffle_seed)
     (dataset_dir / "lang.txt").write_text(f"{language}\n", encoding="utf-8")
 
     dataset_info = {
@@ -455,8 +481,11 @@ def _prepare_workspace(spec_key: str, dataset_dir: Path, training_root: Path) ->
 def _download_restore_path(spec_key: str, use_pretrained: bool, restore_path: str | None, progress: ProgressCallback) -> str | None:
     spec = get_model_spec(spec_key)
     if restore_path:
-        return str(Path(restore_path).expanduser().resolve())
-    if not use_pretrained or not spec.official_model_id or spec.family == "xtts":
+        return str(_resolve_user_path(restore_path, must_exist=True, expect_directory=False))
+    if spec.family == "xtts":
+        _notify(progress, f"{spec.label} already downloads its official base checkpoint inside the recipe.")
+        return None
+    if not use_pretrained or not spec.official_model_id:
         return None
     _notify(progress, f"Downloading base checkpoint for {spec.label}...")
     model_path, _, _ = ModelManager(progress_bar=True).download_model(spec.official_model_id)
@@ -531,6 +560,17 @@ def _latest_matching_file(root: Path, patterns: Sequence[str]) -> Path | None:
     if not candidates:
         return None
     return max(candidates, key=lambda item: item.stat().st_mtime)
+
+
+def _pick_reference_wav(dataset_dir: Path, dataset_info: dict[str, Any]) -> str:
+    reference_wav = dataset_info.get("reference_wav")
+    if reference_wav and Path(reference_wav).exists():
+        return reference_wav
+    wavs_dir = dataset_dir / "wavs"
+    candidates = sorted(wavs_dir.glob("*.wav"))
+    if not candidates:
+        return ""
+    return str(max(candidates, key=lambda path: sf.info(str(path)).duration))
 
 
 def _optimize_xtts_checkpoint(source_path: Path, destination_path: Path) -> None:
@@ -615,16 +655,16 @@ def _finalize_training_artifacts(
 
 def _normalize_dataset_dir(dataset_dir: str | None, output_root: str) -> Path:
     if dataset_dir:
-        path = Path(dataset_dir).expanduser().resolve()
+        path = _resolve_user_path(dataset_dir, must_exist=True, expect_directory=True)
     else:
-        path = Path(output_root).expanduser().resolve() / "dataset" / "LJSpeech-1.1"
+        path = _resolve_user_path(output_root, expect_directory=True) / "dataset" / "LJSpeech-1.1"
     if not path.exists():
         raise FileNotFoundError(f"Dataset directory not found: {path}")
     return path
 
 
 def load_dataset_info(dataset_dir: str) -> dict[str, Any]:
-    info_path = Path(dataset_dir).expanduser().resolve() / "dataset_info.json"
+    info_path = _resolve_user_path(dataset_dir, must_exist=True, expect_directory=True) / "dataset_info.json"
     if info_path.exists():
         return json.loads(info_path.read_text(encoding="utf-8"))
     return {}
@@ -649,7 +689,7 @@ def train_model(
     spec = get_model_spec(model_key)
     dataset_root = _normalize_dataset_dir(dataset_dir, output_root)
     dataset_info = load_dataset_info(str(dataset_root))
-    output_root_path = Path(output_root).expanduser().resolve()
+    output_root_path = _resolve_user_path(output_root, expect_directory=True)
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     training_root = output_root_path / "training_runs" / model_key / timestamp
     training_root.mkdir(parents=True, exist_ok=True)
@@ -659,7 +699,7 @@ def train_model(
     if extra_overrides_json and not isinstance(extra_overrides, dict):
         raise ValueError("extra_overrides_json must be a JSON object.")
 
-    reference_wav = dataset_info.get("reference_wav") or _latest_matching_file(dataset_root / "wavs", ["*.wav"])
+    reference_wav = _pick_reference_wav(dataset_root, dataset_info)
     workspace_root, script_path = _prepare_workspace(model_key, dataset_root, training_root)
     unused_overrides = _patch_recipe_script(
         script_path,
@@ -702,7 +742,7 @@ def train_model(
     if result.returncode != 0:
         raise RuntimeError(
             f"Training failed for {spec.label}. See {log_path}\n\n"
-            f"STDOUT:\n{result.stdout[-4000:]}\n\nSTDERR:\n{result.stderr[-4000:]}"
+            f"STDOUT:\n{result.stdout[-ERROR_LOG_TAIL_CHARS:]}\n\nSTDERR:\n{result.stderr[-ERROR_LOG_TAIL_CHARS:]}"
         )
     artifacts = _finalize_training_artifacts(
         spec_key=model_key,
@@ -716,7 +756,7 @@ def train_model(
 
 
 def find_latest_artifacts(output_root: str, model_key: str | None = None) -> dict[str, Any]:
-    base = Path(output_root).expanduser().resolve()
+    base = _resolve_user_path(output_root, must_exist=True, expect_directory=True)
     search_root = base / "training_runs"
     if model_key:
         search_root = search_root / model_key
@@ -729,7 +769,7 @@ def find_latest_artifacts(output_root: str, model_key: str | None = None) -> dic
 
 
 def load_artifacts(artifacts_path_or_dir: str, model_key: str | None = None) -> dict[str, Any]:
-    path = Path(artifacts_path_or_dir).expanduser().resolve()
+    path = _resolve_user_path(artifacts_path_or_dir, must_exist=True)
     if path.is_dir():
         artifacts_file = path / "artifacts.json"
         if not artifacts_file.exists():
@@ -820,7 +860,7 @@ def synthesize(
     if not text.strip():
         raise ValueError("Text is required for synthesis.")
     artifacts = load_artifacts(artifacts_path_or_dir, model_key=model_key)
-    output_path = Path(output_file).expanduser().resolve()
+    output_path = _resolve_user_path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     speaker_reference = speaker_wav or artifacts.get("reference_wav")
 
@@ -880,7 +920,7 @@ def format_exception(exc: Exception) -> str:
 
 
 def default_test_output(output_root: str) -> str:
-    return str(Path(output_root).expanduser().resolve() / "samples" / f"sample_{int(time.time())}.wav")
+    return str(_resolve_user_path(output_root, expect_directory=True) / "samples" / f"sample_{int(time.time())}.wav")
 
 
 def dropdown_choices() -> list[tuple[str, str]]:

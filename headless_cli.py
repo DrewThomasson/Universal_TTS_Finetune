@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 
 from utils.pipeline import (
     default_test_output,
     dropdown_choices,
     find_latest_artifacts,
     list_supported_models,
+    load_artifacts,
     prepare_dataset,
     synthesize,
     train_model,
@@ -127,9 +127,10 @@ def main() -> None:
         return
 
     if args.command == "synthesize":
-        output_file = args.output_file or default_test_output(str(Path(args.artifacts).resolve()))
+        artifacts = load_artifacts(args.artifacts, model_key=args.model)
+        output_file = args.output_file or default_test_output(artifacts["training_root"])
         result = synthesize(
-            artifacts_path_or_dir=args.artifacts,
+            artifacts_path_or_dir=artifacts["artifacts_file"],
             model_key=args.model,
             text=args.text,
             language=args.language,

@@ -52,12 +52,12 @@ def _gradio_progress(progress: gr.Progress | None):
     return callback
 
 
-def preprocess_dataset(audio_files, audio_folder_path, transcript_file, language, whisper_model, out_path, progress=gr.Progress()):
+def preprocess_dataset(audio_files, audio_dir, transcript_file, language, whisper_model, out_path, progress=gr.Progress()):
     try:
         result = prepare_dataset(
             output_root=out_path,
             audio_files=audio_files,
-            audio_dir=audio_folder_path or None,
+            audio_dir=audio_dir or None,
             transcript_file=_path_value(transcript_file),
             language=language,
             whisper_model_name=whisper_model,
@@ -173,7 +173,7 @@ if __name__ == "__main__":
                 file_count="multiple",
                 label="Audio files (wav, mp3, flac, m4a, ogg)",
             )
-            audio_folder_path = gr.Textbox(label="Audio folder path (optional)", value="")
+            audio_dir = gr.Textbox(label="Audio folder path (optional)", value="")
             transcript_file = gr.File(label="Optional transcript map (csv, tsv, pipe-delimited txt, or json)")
             language = gr.Dropdown(label="Dataset language", choices=LANGUAGE_CHOICES, value="en")
             whisper_model = gr.Dropdown(label="Whisper model", choices=WHISPER_CHOICES, value="small")
@@ -222,7 +222,7 @@ if __name__ == "__main__":
 
         prepare_btn.click(
             fn=preprocess_dataset,
-            inputs=[audio_upload, audio_folder_path, transcript_file, language, whisper_model, out_path],
+            inputs=[audio_upload, audio_dir, transcript_file, language, whisper_model, out_path],
             outputs=[dataset_status, dataset_dir, train_csv, val_csv, dataset_reference],
         )
         prepare_btn.click(fn=lambda path: path, inputs=[dataset_dir], outputs=[train_dataset_dir])
