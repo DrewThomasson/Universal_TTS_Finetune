@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import traceback
+import warnings
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -93,7 +94,10 @@ def _resolve_user_path(
         raise ValueError("Path values cannot contain null bytes.")
     if not re.fullmatch(r"[\w\s./:\\-]+", raw_value):
         raise ValueError(f"Unsupported characters in path: {raw_value!r}")
-    candidate = Path(raw_value).expanduser()
+    raw_path = Path(raw_value)
+    if ".." in raw_path.parts:
+        raise ValueError("Parent directory traversal is not allowed in path inputs.")
+    candidate = raw_path.expanduser()
     try:
         resolved = candidate.resolve(strict=must_exist)
     except FileNotFoundError:
@@ -582,10 +586,20 @@ def _pick_reference_wav(dataset_dir: Path, dataset_info: dict[str, Any]) -> str:
     return str(max(candidates, key=lambda path: sf.info(str(path)).duration))
 
 
+def _tail_text(value: str, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    return value[-max_chars:]
+
+
 def _optimize_xtts_checkpoint(source_path: Path, destination_path: Path) -> None:
     try:
         checkpoint = torch.load(str(source_path), map_location=torch.device("cpu"), weights_only=True)
     except TypeError:
+        warnings.warn(
+            "Falling back to torch.load without weights_only=True. Do not load untrusted checkpoints.",
+            RuntimeWarning,
+        )
         checkpoint = torch.load(str(source_path), map_location=torch.device("cpu"))
     checkpoint.pop("optimizer", None)
     model_state = checkpoint.get("model", {})
@@ -756,7 +770,8 @@ def train_model(
     if result.returncode != 0:
         raise RuntimeError(
             f"Training failed for {spec.label}. See {log_path}\n\n"
-            f"STDOUT:\n{stdout[-ERROR_LOG_TAIL_CHARS:]}\n\nSTDERR:\n{stderr[-ERROR_LOG_TAIL_CHARS:]}"
+            f"STDOUT:\n{_tail_text(stdout, ERROR_LOG_TAIL_CHARS)}\n\n"
+            f"STDERR:\n{_tail_text(stderr, ERROR_LOG_TAIL_CHARS)}"
         )
     artifacts = _finalize_training_artifacts(
         spec_key=model_key,
