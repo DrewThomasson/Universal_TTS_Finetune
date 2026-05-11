@@ -1,0 +1,887 @@
+from __future__ import annotations
+
+import csv
+import json
+import os
+import random
+import re
+import shutil
+import subprocess
+import sys
+import time
+import traceback
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any, Callable, Iterable, Sequence
+
+import soundfile as sf
+import torch
+import torchaudio
+from faster_whisper import WhisperModel
+from TTS.api import TTS
+from TTS.tts.configs.xtts_config import XttsConfig
+from TTS.tts.models.xtts import Xtts
+from TTS.utils.manage import ModelManager
+
+from utils.model_registry import MODEL_SPECS, REPO_ROOT, get_model_spec, list_model_choices
+from utils.tokenizer import multilingual_cleaners
+
+AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".m4a", ".ogg"}
+DEFAULT_SAMPLE_RATE = 22050
+DEFAULT_EVAL_PERCENTAGE = 0.15
+DEFAULT_MIN_SEGMENT_SECONDS = 0.5
+DEFAULT_MAX_SEGMENT_SECONDS = 12.0
+DEFAULT_SEGMENT_BUFFER_SECONDS = 0.2
+PUNCTUATION_ENDINGS = (".", "!", "?", "。", "！", "？")
+MODEL_CACHE: dict[str, Any] = {}
+
+ProgressCallback = Callable[[str], None] | None
+
+
+def _notify(progress: ProgressCallback, message: str) -> None:
+    print(message)
+    if progress:
+        progress(message)
+
+
+def _json_ready(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(item) for item in value]
+    return value
+
+
+def _safe_name(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._")
+    return safe or "sample"
+
+
+def _coerce_path(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("path", "name"):
+            candidate = value.get(key)
+            if candidate:
+                return str(candidate)
+        return None
+    candidate = getattr(value, "name", None)
+    if candidate:
+        return str(candidate)
+    candidate = getattr(value, "path", None)
+    if candidate:
+        return str(candidate)
+    return None
+
+
+def resolve_audio_files(audio_files: Sequence[Any] | None = None, audio_dir: str | None = None) -> list[str]:
+    resolved: list[str] = []
+    if audio_dir:
+        directory = Path(audio_dir).expanduser().resolve()
+        if not directory.exists():
+            raise FileNotFoundError(f"Audio directory not found: {directory}")
+        for path in sorted(directory.rglob("*")):
+            if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS:
+                resolved.append(str(path))
+    for item in audio_files or []:
+        candidate = _coerce_path(item)
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser().resolve()
+        if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS:
+            resolved.append(str(path))
+    deduplicated = []
+    seen: set[str] = set()
+    for item in resolved:
+        if item not in seen:
+            seen.add(item)
+            deduplicated.append(item)
+    return deduplicated
+
+
+def _load_waveform(audio_path: Path, sample_rate: int = DEFAULT_SAMPLE_RATE) -> tuple[torch.Tensor, int]:
+    try:
+        waveform, source_rate = torchaudio.load(str(audio_path))
+    except (ImportError, RuntimeError):
+        data, source_rate = sf.read(str(audio_path), always_2d=False)
+        waveform = torch.tensor(data, dtype=torch.float32)
+        if waveform.ndim == 1:
+            waveform = waveform.unsqueeze(0)
+        else:
+            waveform = waveform.transpose(0, 1)
+    if waveform.size(0) > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)
+    if source_rate != sample_rate:
+        waveform = torchaudio.functional.resample(waveform, source_rate, sample_rate)
+        source_rate = sample_rate
+    return waveform, source_rate
+
+
+def _save_waveform(destination: Path, waveform: torch.Tensor, sample_rate: int) -> None:
+    tensor = waveform.detach().cpu()
+    try:
+        torchaudio.save(str(destination), tensor, sample_rate)
+        return
+    except (ImportError, RuntimeError):
+        pass
+    array = tensor.squeeze(0).numpy()
+    sf.write(str(destination), array, sample_rate)
+
+
+def _load_transcript_map(transcript_file: str | None) -> dict[str, str]:
+    if not transcript_file:
+        return {}
+    path = Path(transcript_file).expanduser().resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"Transcript file not found: {path}")
+    suffix = path.suffix.lower()
+    mapping: dict[str, str] = {}
+    if suffix == ".json":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            iterable = payload.items()
+        elif isinstance(payload, list):
+            iterable = []
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                audio_key = item.get("audio") or item.get("audio_file") or item.get("path") or item.get("file")
+                text_value = item.get("text") or item.get("transcript") or item.get("sentence")
+                if audio_key and text_value:
+                    iterable.append((audio_key, text_value))
+        else:
+            raise ValueError("Unsupported JSON transcript format.")
+        for key, value in iterable:
+            if value:
+                mapping[str(key)] = str(value).strip()
+    else:
+        delimiter = "|"
+        if suffix == ".tsv":
+            delimiter = "\t"
+        elif suffix == ".csv":
+            delimiter = ","
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            sample = handle.read(2048)
+            handle.seek(0)
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=",\t|")
+                delimiter = dialect.delimiter
+            except csv.Error:
+                pass
+            reader = csv.reader(handle, delimiter=delimiter)
+            rows = list(reader)
+        if not rows:
+            return {}
+        header = [cell.strip().lower() for cell in rows[0]]
+        data_rows = rows[1:] if {"text", "transcript", "sentence"}.intersection(header) else rows
+        if data_rows is rows:
+            header = []
+        audio_index = 0
+        text_index = 1 if len(rows[0]) > 1 else 0
+        if header:
+            for idx, cell in enumerate(header):
+                if cell in {"audio", "audio_file", "file", "path", "filename"}:
+                    audio_index = idx
+                if cell in {"text", "transcript", "sentence", "utterance"}:
+                    text_index = idx
+        for row in data_rows:
+            if not row:
+                continue
+            if len(row) <= max(audio_index, text_index):
+                continue
+            audio_key = row[audio_index].strip()
+            text_value = row[text_index].strip()
+            if audio_key and text_value:
+                mapping[audio_key] = text_value
+    normalized: dict[str, str] = {}
+    for key, value in mapping.items():
+        path_key = Path(key)
+        normalized[str(path_key)] = value
+        normalized[path_key.name] = value
+        normalized[path_key.stem] = value
+    return normalized
+
+
+def _lookup_transcript(audio_path: Path, transcript_map: dict[str, str]) -> str | None:
+    keys = (str(audio_path), audio_path.name, audio_path.stem)
+    for key in keys:
+        if key in transcript_map:
+            return transcript_map[key]
+    return None
+
+
+def _clean_text(text: str, language: str) -> str:
+    text = re.sub(r"\s+", " ", text or "").strip()
+    if not text:
+        return ""
+    try:
+        cleaned = multilingual_cleaners(text, language)
+        cleaned = re.sub(r"\s+", " ", cleaned or "").strip()
+        return cleaned or text
+    except Exception:
+        return text
+
+
+def _write_metadata_files(entries: list[dict[str, Any]], dataset_dir: Path, eval_percentage: float) -> dict[str, str]:
+    metadata_path = dataset_dir / "metadata.csv"
+    shuffled_path = dataset_dir / "metadata_shuf.csv"
+    train_path = dataset_dir / "metadata_train.csv"
+    val_path = dataset_dir / "metadata_val.csv"
+
+    rows = [f"{item['id']}|{item['text']}|{item['original_text']}" for item in entries]
+    metadata_path.write_text("\n".join(rows) + ("\n" if rows else ""), encoding="utf-8")
+
+    shuffled_entries = list(entries)
+    random.Random(0).shuffle(shuffled_entries)
+    shuffled_rows = [f"{item['id']}|{item['text']}|{item['original_text']}" for item in shuffled_entries]
+    shuffled_path.write_text("\n".join(shuffled_rows) + ("\n" if shuffled_rows else ""), encoding="utf-8")
+
+    if len(shuffled_entries) <= 1:
+        train_entries = shuffled_entries
+        val_entries: list[dict[str, Any]] = []
+    else:
+        val_count = max(1, int(round(len(shuffled_entries) * eval_percentage)))
+        val_count = min(val_count, len(shuffled_entries) - 1)
+        train_entries = shuffled_entries[:-val_count]
+        val_entries = shuffled_entries[-val_count:]
+
+    train_rows = [f"{item['id']}|{item['text']}|{item['original_text']}" for item in train_entries]
+    val_rows = [f"{item['id']}|{item['text']}|{item['original_text']}" for item in val_entries]
+    train_path.write_text("\n".join(train_rows) + ("\n" if train_rows else ""), encoding="utf-8")
+    val_path.write_text("\n".join(val_rows) + ("\n" if val_rows else ""), encoding="utf-8")
+
+    return {
+        "metadata": str(metadata_path),
+        "metadata_shuf": str(shuffled_path),
+        "metadata_train": str(train_path),
+        "metadata_val": str(val_path),
+    }
+
+
+def prepare_dataset(
+    *,
+    output_root: str,
+    audio_files: Sequence[Any] | None = None,
+    audio_dir: str | None = None,
+    transcript_file: str | None = None,
+    language: str = "en",
+    whisper_model_name: str = "small",
+    eval_percentage: float = DEFAULT_EVAL_PERCENTAGE,
+    min_segment_seconds: float = DEFAULT_MIN_SEGMENT_SECONDS,
+    max_segment_seconds: float = DEFAULT_MAX_SEGMENT_SECONDS,
+    segment_buffer_seconds: float = DEFAULT_SEGMENT_BUFFER_SECONDS,
+    progress: ProgressCallback = None,
+) -> dict[str, Any]:
+    resolved_audio_files = resolve_audio_files(audio_files, audio_dir)
+    if not resolved_audio_files:
+        raise ValueError("No audio files found. Provide files directly or point to a folder that contains audio.")
+
+    output_root_path = Path(output_root).expanduser().resolve()
+    dataset_dir = output_root_path / "dataset" / "LJSpeech-1.1"
+    wavs_dir = dataset_dir / "wavs"
+    if dataset_dir.exists():
+        shutil.rmtree(dataset_dir)
+    wavs_dir.mkdir(parents=True, exist_ok=True)
+
+    transcript_map = _load_transcript_map(transcript_file)
+    use_whisper = not transcript_map
+    asr_model: WhisperModel | None = None
+    if use_whisper:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        compute_type = "float16" if torch.cuda.is_available() else "int8"
+        _notify(progress, f"Loading Whisper model '{whisper_model_name}' on {device}...")
+        asr_model = WhisperModel(whisper_model_name, device=device, compute_type=compute_type)
+
+    entries: list[dict[str, Any]] = []
+    total_seconds = 0.0
+    longest_entry: dict[str, Any] | None = None
+
+    for index, audio_file in enumerate(resolved_audio_files, start=1):
+        audio_path = Path(audio_file).expanduser().resolve()
+        _notify(progress, f"Processing {index}/{len(resolved_audio_files)}: {audio_path.name}")
+        waveform, sample_rate = _load_waveform(audio_path)
+        total_duration = waveform.shape[-1] / sample_rate
+        total_seconds += total_duration
+        base_name = _safe_name(audio_path.stem)
+
+        if transcript_map:
+            transcript = _lookup_transcript(audio_path, transcript_map)
+            if not transcript:
+                raise ValueError(f"Missing transcript for {audio_path.name}")
+            cleaned = _clean_text(transcript, language)
+            sample_id = base_name
+            destination = wavs_dir / f"{sample_id}.wav"
+            suffix = 1
+            while destination.exists():
+                sample_id = f"{base_name}_{suffix:02d}"
+                destination = wavs_dir / f"{sample_id}.wav"
+                suffix += 1
+            _save_waveform(destination, waveform, sample_rate)
+            entry = {
+                "id": sample_id,
+                "text": cleaned,
+                "original_text": transcript.strip(),
+                "audio_path": str(destination),
+                "duration_seconds": total_duration,
+            }
+            entries.append(entry)
+            if longest_entry is None or entry["duration_seconds"] > longest_entry["duration_seconds"]:
+                longest_entry = entry
+            continue
+
+        assert asr_model is not None
+        segments, _ = asr_model.transcribe(
+            str(audio_path),
+            language=language,
+            vad_filter=True,
+            word_timestamps=True,
+        )
+        words = [word for segment in segments for word in (getattr(segment, "words", None) or [])]
+        if not words:
+            raise ValueError(f"Whisper did not return timestamped words for {audio_path.name}")
+
+        clip_index = 0
+        sentence_words: list[Any] = []
+        sentence_start: float | None = None
+        for word_index, word in enumerate(words):
+            if sentence_start is None:
+                sentence_start = max(float(word.start) - segment_buffer_seconds, 0.0)
+            sentence_words.append(word)
+            current_duration = float(word.end) - sentence_start
+            at_end = word_index == len(words) - 1
+            text_fragment = "".join(item.word for item in sentence_words).strip()
+            ends_sentence = text_fragment.endswith(PUNCTUATION_ENDINGS)
+            should_flush = at_end or ends_sentence or current_duration >= max_segment_seconds
+            if not should_flush:
+                continue
+
+            clip_end = min(float(word.end) + segment_buffer_seconds, total_duration)
+            sentence_text = re.sub(r"\s+", " ", "".join(item.word for item in sentence_words)).strip()
+            cleaned = _clean_text(sentence_text, language)
+            duration_seconds = clip_end - sentence_start
+            if cleaned and duration_seconds >= min_segment_seconds:
+                sample_id = f"{base_name}_{clip_index:08d}"
+                destination = wavs_dir / f"{sample_id}.wav"
+                start_frame = max(0, int(sentence_start * sample_rate))
+                end_frame = min(waveform.shape[-1], int(clip_end * sample_rate))
+                clip = waveform[:, start_frame:end_frame]
+                if clip.shape[-1] >= int(min_segment_seconds * sample_rate):
+                    _save_waveform(destination, clip, sample_rate)
+                    entry = {
+                        "id": sample_id,
+                        "text": cleaned,
+                        "original_text": sentence_text,
+                        "audio_path": str(destination),
+                        "duration_seconds": duration_seconds,
+                    }
+                    entries.append(entry)
+                    if longest_entry is None or duration_seconds > longest_entry["duration_seconds"]:
+                        longest_entry = entry
+                    clip_index += 1
+            sentence_words = []
+            sentence_start = None
+
+    if not entries:
+        raise ValueError("No usable training samples were created from the provided audio.")
+
+    metadata_files = _write_metadata_files(entries, dataset_dir, eval_percentage)
+    (dataset_dir / "lang.txt").write_text(f"{language}\n", encoding="utf-8")
+
+    dataset_info = {
+        "dataset_dir": str(dataset_dir),
+        "wavs_dir": str(wavs_dir),
+        "language": language,
+        "sample_rate": DEFAULT_SAMPLE_RATE,
+        "input_audio_count": len(resolved_audio_files),
+        "created_sample_count": len(entries),
+        "total_audio_seconds": round(total_seconds, 2),
+        "reference_wav": longest_entry["audio_path"] if longest_entry else "",
+        **metadata_files,
+    }
+    info_path = dataset_dir / "dataset_info.json"
+    info_path.write_text(json.dumps(_json_ready(dataset_info), indent=2), encoding="utf-8")
+    dataset_info["dataset_info"] = str(info_path)
+    return dataset_info
+
+
+def _replace_literal(source: str, old: str, new: str) -> str:
+    return source.replace(old, new) if old in source else source
+
+
+def _replace_keyword_value(source: str, keyword: str, value: str) -> str:
+    patterns = [
+        rf"(?P<prefix>\b{re.escape(keyword)}\s*=\s*)(?P<value>[^,\n\)]+)",
+        rf"(?P<prefix>^{re.escape(keyword)}\s*=\s*)(?P<value>.+)$",
+    ]
+    flags = [re.MULTILINE, re.MULTILINE]
+    for pattern, flag in zip(patterns, flags):
+        source, count = re.subn(pattern, rf"\g<prefix>{value}", source, count=1, flags=flag)
+        if count:
+            break
+    return source
+
+
+def _apply_source_overrides(source: str, overrides: dict[str, Any]) -> tuple[str, list[str]]:
+    unused: list[str] = []
+    for key, value in overrides.items():
+        rendered = repr(value) if isinstance(value, str) else json.dumps(value)
+        updated = _replace_keyword_value(source, key, rendered)
+        if updated == source:
+            unused.append(key)
+        source = updated
+    return source, unused
+
+
+def _prepare_workspace(spec_key: str, dataset_dir: Path, training_root: Path) -> tuple[Path, Path]:
+    spec = get_model_spec(spec_key)
+    workspace_root = training_root / "workspace"
+    recipe_target_dir = workspace_root / "recipes" / "ljspeech" / spec.recipe_dir
+    dataset_target_dir = workspace_root / "recipes" / "ljspeech" / "LJSpeech-1.1"
+    if workspace_root.exists():
+        shutil.rmtree(workspace_root)
+    recipe_target_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(spec.recipe_path, recipe_target_dir)
+    shutil.copytree(dataset_dir, dataset_target_dir)
+    return workspace_root, recipe_target_dir / spec.train_script
+
+
+def _download_restore_path(spec_key: str, use_pretrained: bool, restore_path: str | None, progress: ProgressCallback) -> str | None:
+    spec = get_model_spec(spec_key)
+    if restore_path:
+        return str(Path(restore_path).expanduser().resolve())
+    if not use_pretrained or not spec.official_model_id or spec.family == "xtts":
+        return None
+    _notify(progress, f"Downloading base checkpoint for {spec.label}...")
+    model_path, _, _ = ModelManager(progress_bar=True).download_model(spec.official_model_id)
+    return model_path
+
+
+def _patch_recipe_script(
+    script_path: Path,
+    *,
+    spec_key: str,
+    dataset_dir: Path,
+    language: str,
+    epochs: int,
+    batch_size: int,
+    grad_accum: int,
+    max_audio_seconds: int,
+    restore_path: str | None,
+    extra_overrides: dict[str, Any],
+    reference_wav: str,
+) -> list[str]:
+    source = script_path.read_text(encoding="utf-8")
+    dataset_str = str(dataset_dir)
+    wavs_str = str(dataset_dir / "wavs")
+
+    source = _replace_literal(source, 'path=os.path.join(output_path, "../LJSpeech-1.1/")', f'path=r"{dataset_str}"')
+    source = _replace_literal(source, 'path="/raid/datasets/LJSpeech-1.1_24khz/"', f'path=r"{dataset_str}"')
+    source = _replace_literal(
+        source,
+        'meta_file_train="/raid/datasets/LJSpeech-1.1_24khz/metadata.csv"',
+        f'meta_file_train=r"{dataset_str}/metadata.csv"',
+    )
+    source = _replace_literal(source, 'data_path = ""', f'data_path = r"{dataset_str}"')
+    source = _replace_literal(
+        source,
+        'data_path=os.path.join(output_path, "../LJSpeech-1.1/wavs/")',
+        f'data_path=r"{wavs_str}"',
+    )
+    source = _replace_literal(source, 'python TTS/bin/compute_attention_masks.py', 'python -m TTS.bin.compute_attention_masks')
+    if not torch.cuda.is_available():
+        source = source.replace('--use_cuda"', '"')
+        source = source.replace('--use_cuda\'"', '\'"')
+
+    source = _replace_keyword_value(source, "batch_size", str(batch_size))
+    source = _replace_keyword_value(source, "eval_batch_size", str(batch_size))
+    source = _replace_keyword_value(source, "epochs", str(epochs))
+    source = _replace_keyword_value(source, "BATCH_SIZE", str(batch_size))
+    source = _replace_keyword_value(source, "GRAD_ACUMM_STEPS", str(grad_accum))
+    source = _replace_keyword_value(source, "max_wav_length", str(int(max_audio_seconds * DEFAULT_SAMPLE_RATE)))
+
+    if spec_key.startswith("xtts_"):
+        source = _replace_keyword_value(source, "language", repr(language))
+        speaker_value = f'SPEAKER_REFERENCE = [r"{reference_wav}"]'
+        source = re.sub(r"SPEAKER_REFERENCE\s*=\s*\[[^\]]*\]", speaker_value, source, count=1, flags=re.DOTALL)
+        if restore_path:
+            source = _replace_keyword_value(source, "XTTS_CHECKPOINT", repr(restore_path))
+    elif restore_path:
+        if "restore_path=None" in source:
+            source = source.replace("restore_path=None", f"restore_path=r\"{restore_path}\"", 1)
+        else:
+            source = source.replace("TrainerArgs()", f"TrainerArgs(restore_path=r\"{restore_path}\")", 1)
+
+    source, unused = _apply_source_overrides(source, extra_overrides)
+    script_path.write_text(source, encoding="utf-8")
+    return unused
+
+
+def _latest_matching_file(root: Path, patterns: Sequence[str]) -> Path | None:
+    candidates: list[Path] = []
+    for pattern in patterns:
+        candidates.extend(root.rglob(pattern))
+    candidates = [path for path in candidates if path.is_file()]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item.stat().st_mtime)
+
+
+def _optimize_xtts_checkpoint(source_path: Path, destination_path: Path) -> None:
+    checkpoint = torch.load(str(source_path), map_location=torch.device("cpu"))
+    checkpoint.pop("optimizer", None)
+    model_state = checkpoint.get("model", {})
+    for key in list(model_state):
+        if "dvae" in key:
+            del model_state[key]
+    torch.save(checkpoint, str(destination_path))
+
+
+def _finalize_training_artifacts(
+    *,
+    spec_key: str,
+    training_root: Path,
+    dataset_dir: Path,
+    reference_wav: str,
+) -> dict[str, Any]:
+    spec = get_model_spec(spec_key)
+    ready_dir = training_root / "ready"
+    ready_dir.mkdir(parents=True, exist_ok=True)
+
+    workspace_root = training_root / "workspace"
+    checkpoint = _latest_matching_file(workspace_root, ["best_model.pth", "*.pth"])
+    if checkpoint is None:
+        raise FileNotFoundError(f"No checkpoint file was produced for {spec.label}.")
+
+    ignored_suffixes = {"vocab.json", "speakers_xtts.pth", "mel_stats.pth", "dvae.pth"}
+    if checkpoint.name in ignored_suffixes:
+        raise FileNotFoundError(f"A trainable checkpoint for {spec.label} was not found.")
+
+    config_path = checkpoint.parent / "config.json"
+    if not config_path.exists():
+        config_path = _latest_matching_file(workspace_root, ["config.json"])
+    if config_path is None:
+        raise FileNotFoundError(f"config.json was not found for {spec.label}.")
+
+    ready_checkpoint = ready_dir / "model.pth"
+    if spec.family == "xtts":
+        _optimize_xtts_checkpoint(checkpoint, ready_checkpoint)
+    else:
+        shutil.copy2(checkpoint, ready_checkpoint)
+
+    ready_config = ready_dir / "config.json"
+    shutil.copy2(config_path, ready_config)
+
+    artifacts: dict[str, Any] = {
+        "model_key": spec.key,
+        "model_label": spec.label,
+        "family": spec.family,
+        "training_root": str(training_root),
+        "dataset_dir": str(dataset_dir),
+        "checkpoint": str(ready_checkpoint),
+        "config": str(ready_config),
+        "reference_wav": reference_wav,
+        "default_vocoder_id": spec.default_vocoder_id,
+    }
+
+    if reference_wav and Path(reference_wav).exists():
+        ready_reference = ready_dir / "reference.wav"
+        shutil.copy2(reference_wav, ready_reference)
+        artifacts["reference_wav"] = str(ready_reference)
+
+    if spec.family == "xtts":
+        vocab = _latest_matching_file(workspace_root, ["vocab.json"])
+        speaker = _latest_matching_file(workspace_root, ["speakers_xtts.pth"])
+        if not vocab or not speaker:
+            raise FileNotFoundError("XTTS training completed but vocab.json or speakers_xtts.pth was not found.")
+        ready_vocab = ready_dir / "vocab.json"
+        ready_speaker = ready_dir / "speakers_xtts.pth"
+        shutil.copy2(vocab, ready_vocab)
+        shutil.copy2(speaker, ready_speaker)
+        artifacts["vocab"] = str(ready_vocab)
+        artifacts["speaker_file"] = str(ready_speaker)
+
+    artifacts_path = ready_dir / "artifacts.json"
+    artifacts_path.write_text(json.dumps(_json_ready(artifacts), indent=2), encoding="utf-8")
+    artifacts["artifacts_file"] = str(artifacts_path)
+    return artifacts
+
+
+def _normalize_dataset_dir(dataset_dir: str | None, output_root: str) -> Path:
+    if dataset_dir:
+        path = Path(dataset_dir).expanduser().resolve()
+    else:
+        path = Path(output_root).expanduser().resolve() / "dataset" / "LJSpeech-1.1"
+    if not path.exists():
+        raise FileNotFoundError(f"Dataset directory not found: {path}")
+    return path
+
+
+def load_dataset_info(dataset_dir: str) -> dict[str, Any]:
+    info_path = Path(dataset_dir).expanduser().resolve() / "dataset_info.json"
+    if info_path.exists():
+        return json.loads(info_path.read_text(encoding="utf-8"))
+    return {}
+
+
+def train_model(
+    *,
+    model_key: str,
+    output_root: str,
+    dataset_dir: str | None = None,
+    language: str = "en",
+    epochs: int = 10,
+    batch_size: int = 8,
+    grad_accum: int = 1,
+    max_audio_seconds: int = 11,
+    restore_path: str | None = None,
+    use_pretrained: bool = True,
+    extra_overrides_json: str | None = None,
+    dry_run: bool = False,
+    progress: ProgressCallback = None,
+) -> dict[str, Any]:
+    spec = get_model_spec(model_key)
+    dataset_root = _normalize_dataset_dir(dataset_dir, output_root)
+    dataset_info = load_dataset_info(str(dataset_root))
+    output_root_path = Path(output_root).expanduser().resolve()
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    training_root = output_root_path / "training_runs" / model_key / timestamp
+    training_root.mkdir(parents=True, exist_ok=True)
+
+    computed_restore_path = _download_restore_path(model_key, use_pretrained, restore_path, progress)
+    extra_overrides = json.loads(extra_overrides_json) if extra_overrides_json else {}
+    if extra_overrides_json and not isinstance(extra_overrides, dict):
+        raise ValueError("extra_overrides_json must be a JSON object.")
+
+    reference_wav = dataset_info.get("reference_wav") or _latest_matching_file(dataset_root / "wavs", ["*.wav"])
+    workspace_root, script_path = _prepare_workspace(model_key, dataset_root, training_root)
+    unused_overrides = _patch_recipe_script(
+        script_path,
+        spec_key=model_key,
+        dataset_dir=dataset_root,
+        language=language,
+        epochs=epochs,
+        batch_size=batch_size,
+        grad_accum=grad_accum,
+        max_audio_seconds=max_audio_seconds,
+        restore_path=computed_restore_path,
+        extra_overrides=extra_overrides,
+        reference_wav=str(reference_wav) if reference_wav else "",
+    )
+
+    run_summary = {
+        "model_key": spec.key,
+        "model_label": spec.label,
+        "training_root": str(training_root),
+        "workspace_root": str(workspace_root),
+        "dataset_dir": str(dataset_root),
+        "script_path": str(script_path),
+        "restore_path": computed_restore_path or "",
+        "unused_overrides": unused_overrides,
+    }
+    if dry_run:
+        run_summary["status"] = "dry-run"
+        return run_summary
+
+    _notify(progress, f"Starting training for {spec.label}...")
+    result = subprocess.run(
+        [sys.executable, str(script_path)],
+        cwd=str(workspace_root),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    log_path = training_root / "training.log"
+    log_path.write_text((result.stdout or "") + "\n" + (result.stderr or ""), encoding="utf-8")
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Training failed for {spec.label}. See {log_path}\n\n"
+            f"STDOUT:\n{result.stdout[-4000:]}\n\nSTDERR:\n{result.stderr[-4000:]}"
+        )
+    artifacts = _finalize_training_artifacts(
+        spec_key=model_key,
+        training_root=training_root,
+        dataset_dir=dataset_root,
+        reference_wav=str(reference_wav) if reference_wav else "",
+    )
+    artifacts["log_path"] = str(log_path)
+    artifacts["unused_overrides"] = unused_overrides
+    return artifacts
+
+
+def find_latest_artifacts(output_root: str, model_key: str | None = None) -> dict[str, Any]:
+    base = Path(output_root).expanduser().resolve()
+    search_root = base / "training_runs"
+    if model_key:
+        search_root = search_root / model_key
+    artifact_file = _latest_matching_file(search_root, ["artifacts.json"])
+    if not artifact_file:
+        raise FileNotFoundError(f"No trained model artifacts were found under {search_root}")
+    artifacts = json.loads(artifact_file.read_text(encoding="utf-8"))
+    artifacts["artifacts_file"] = str(artifact_file)
+    return artifacts
+
+
+def load_artifacts(artifacts_path_or_dir: str, model_key: str | None = None) -> dict[str, Any]:
+    path = Path(artifacts_path_or_dir).expanduser().resolve()
+    if path.is_dir():
+        artifacts_file = path / "artifacts.json"
+        if not artifacts_file.exists():
+            artifacts_file = path / "ready" / "artifacts.json"
+        if not artifacts_file.exists():
+            if model_key:
+                return find_latest_artifacts(str(path), model_key)
+            raise FileNotFoundError(f"Could not find artifacts.json inside {path}")
+    else:
+        artifacts_file = path
+    artifacts = json.loads(artifacts_file.read_text(encoding="utf-8"))
+    artifacts["artifacts_file"] = str(artifacts_file)
+    return artifacts
+
+
+def _load_xtts_runtime(artifacts: dict[str, Any]) -> Xtts:
+    cache_key = json.dumps({
+        "family": artifacts["family"],
+        "checkpoint": artifacts["checkpoint"],
+        "config": artifacts["config"],
+        "vocab": artifacts.get("vocab"),
+        "speaker_file": artifacts.get("speaker_file"),
+    }, sort_keys=True)
+    if cache_key in MODEL_CACHE:
+        return MODEL_CACHE[cache_key]
+    config = XttsConfig()
+    config.load_json(artifacts["config"])
+    model = Xtts.init_from_config(config)
+    model.load_checkpoint(
+        config,
+        checkpoint_path=artifacts["checkpoint"],
+        vocab_path=artifacts["vocab"],
+        speaker_file_path=artifacts["speaker_file"],
+        use_deepspeed=False,
+    )
+    if torch.cuda.is_available():
+        model.cuda()
+    MODEL_CACHE[cache_key] = model
+    return model
+
+
+def _download_vocoder(vocoder_model_id: str | None, progress: ProgressCallback) -> tuple[str | None, str | None]:
+    if not vocoder_model_id:
+        return None, None
+    _notify(progress, f"Downloading vocoder '{vocoder_model_id}'...")
+    vocoder_path, vocoder_config, _ = ModelManager(progress_bar=True).download_model(vocoder_model_id)
+    return vocoder_path, vocoder_config
+
+
+def _load_tts_runtime(artifacts: dict[str, Any], progress: ProgressCallback) -> TTS:
+    cache_key = json.dumps({
+        "family": artifacts["family"],
+        "checkpoint": artifacts["checkpoint"],
+        "config": artifacts["config"],
+        "vocoder": artifacts.get("vocoder_path"),
+        "vocoder_config": artifacts.get("vocoder_config"),
+    }, sort_keys=True)
+    if cache_key in MODEL_CACHE:
+        return MODEL_CACHE[cache_key]
+    vocoder_path = artifacts.get("vocoder_path")
+    vocoder_config = artifacts.get("vocoder_config")
+    if not vocoder_path and artifacts.get("default_vocoder_id"):
+        vocoder_path, vocoder_config = _download_vocoder(artifacts["default_vocoder_id"], progress)
+        artifacts["vocoder_path"] = vocoder_path
+        artifacts["vocoder_config"] = vocoder_config
+    runtime = TTS(
+        model_path=artifacts["checkpoint"],
+        config_path=artifacts["config"],
+        vocoder_path=vocoder_path,
+        vocoder_config_path=vocoder_config,
+        gpu=torch.cuda.is_available(),
+        progress_bar=False,
+    )
+    MODEL_CACHE[cache_key] = runtime
+    return runtime
+
+
+def synthesize(
+    *,
+    artifacts_path_or_dir: str,
+    text: str,
+    output_file: str,
+    model_key: str | None = None,
+    language: str = "en",
+    speaker_wav: str | None = None,
+    progress: ProgressCallback = None,
+) -> dict[str, Any]:
+    if not text.strip():
+        raise ValueError("Text is required for synthesis.")
+    artifacts = load_artifacts(artifacts_path_or_dir, model_key=model_key)
+    output_path = Path(output_file).expanduser().resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    speaker_reference = speaker_wav or artifacts.get("reference_wav")
+
+    if artifacts["family"] == "xtts":
+        if not speaker_reference:
+            raise ValueError("XTTS inference requires a speaker reference WAV.")
+        _notify(progress, "Loading XTTS model...")
+        model = _load_xtts_runtime(artifacts)
+        gpt_cond_latent, speaker_embedding = model.get_conditioning_latents(
+            audio_path=speaker_reference,
+            gpt_cond_len=model.config.gpt_cond_len,
+            max_ref_length=model.config.max_ref_len,
+            sound_norm_refs=model.config.sound_norm_refs,
+        )
+        _notify(progress, "Generating speech...")
+        output = model.inference(
+            text=text,
+            language=language,
+            gpt_cond_latent=gpt_cond_latent,
+            speaker_embedding=speaker_embedding,
+            temperature=model.config.temperature,
+            length_penalty=model.config.length_penalty,
+            repetition_penalty=model.config.repetition_penalty,
+            top_k=model.config.top_k,
+            top_p=model.config.top_p,
+            enable_text_splitting=True,
+        )
+        waveform = torch.tensor(output["wav"]).unsqueeze(0)
+        _save_waveform(output_path, waveform, 24000)
+    else:
+        _notify(progress, "Loading TTS model...")
+        runtime = _load_tts_runtime(artifacts, progress)
+        _notify(progress, "Generating speech...")
+        runtime.tts_to_file(text=text, file_path=str(output_path), split_sentences=True)
+
+    return {
+        "model_key": artifacts["model_key"],
+        "output_file": str(output_path),
+        "speaker_wav": speaker_reference or "",
+        "artifacts_file": artifacts["artifacts_file"],
+    }
+
+
+def list_supported_models() -> list[dict[str, Any]]:
+    return [
+        {
+            **asdict(spec),
+            "recipe_path": str(spec.recipe_path),
+            "train_script_path": str(spec.train_script_path),
+        }
+        for spec in MODEL_SPECS
+    ]
+
+
+def format_exception(exc: Exception) -> str:
+    return f"{exc}\n\n{traceback.format_exc()}"
+
+
+def default_test_output(output_root: str) -> str:
+    return str(Path(output_root).expanduser().resolve() / "samples" / f"sample_{int(time.time())}.wav")
+
+
+def dropdown_choices() -> list[tuple[str, str]]:
+    return list_model_choices()

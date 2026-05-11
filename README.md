@@ -1,97 +1,188 @@
 # Universal_TTS_Finetune
-Attempt at making a universal script for fine-tuning a wide variety of tts models with a single command
 
-# Confirmed working ljspeech dataset recipies from coqui tts
+Universal Coqui TTS fine-tuning workflow with:
+- a Gradio web GUI
+- a headless CLI
+- LJSpeech-style dataset generation from your own audio
+- optional automatic transcription with Whisper when transcripts are not provided
+- quick post-training inference for the model you just trained
 
-- [ ] align_tts  
-- [ ] delightful_tts  
-- [ ] fast_pitch  
-- [ ] fast_speech  
-- [ ] fastspeech2  
-- [ ] glow_tts  
-- [ ] hifigan  
-- [ ] multiband_melgan  
-- [ ] neuralhmm_tts  
-- [ ] overflow  
-- [ ] speedy_speech  
-- [ ] tacotron2-Capacitron  
-- [ ] tacotron2-DCA  
-- [ ] tacotron2-DDC  
-- [ ] univnet  
-- [ ] vits_tts  
-- [ ] wavegrad  
-- [ ] wavernn  
-- [ ] xtts_v1  
-- [ ] xtts_v2  
+## Supported models
 
+The current workflow targets the bundled `recipes/ljspeech` training recipes for these Coqui models:
 
+- Align TTS
+- DelightfulTTS
+- FastPitch
+- FastSpeech
+- FastSpeech 2
+- Glow-TTS
+- NeuralHMM-TTS
+- Overflow
+- SpeedySpeech
+- Tacotron2 Capacitron
+- Tacotron2 DCA
+- Tacotron2 DDC
+- VITS
+- XTTS v1
+- XTTS v2
 
+When Coqui publishes a matching pretrained checkpoint, the trainer can auto-download it and continue from it. Otherwise the workflow still prepares the recipe workspace and can train from a user-supplied checkpoint or recipe defaults.
 
+## What it does
 
+### 1. Prepare a dataset
 
-## Extra Overkill for training models and such (All supported Coqio tts models and piper-tts in one easy command) 
-- For info about this @DrewThomasson, he is currently working on the development of this, [work-in-progress-repo here](https://github.com/DrewThomasson/Universal_TTS_Finetune)
-- [ ] Make a easy to use training gui for all coqio tts models in th ljspeech format training recipes [here from coqui tts](https://github.com/coqui-ai/TTS/tree/dev/recipes/ljspeech)
-- More info:
-- [Bark TTS training repo](https://github.com/anyvoiceai/Barkify)
-- [Coqui Training docs](https://docs.coqui.ai/en/latest/training_a_model.html)
-- [Coqui training Tutorial for beginners](https://docs.coqui.ai/en/latest/tutorial_for_nervous_beginners.html)
-- [Formatting your dataset](https://docs.coqui.ai/en/latest/formatting_your_dataset.html)
-- [ljspeech dataset generator(Uses whisper for transcription?)](https://github.com/davidmartinrius/speech-dataset-generator)
-- [DeepFilterNet2 for high quality denoising training data](https://github.com/Rikorose/DeepFilterNet)
-- [Styletts2 fine tuning](https://github.com/yl4579/StyleTTS2/discussions/144)
-- [more styletts2 training](https://dagshub.com/blog/styletts2/)
-- [styletts2 finetuning google colab](https://colab.research.google.com/github/yl4579/StyleTTS2/blob/main/Colab/StyleTTS2_Finetune_Demo.ipynb)
-The GUI/headless should be as simple as:
-- [On training piper-tts](https://github.com/rhasspy/piper/blob/master/TRAINING.md)
-- Good news! They all appear to use LJSpeech FORMAT! Even the standard Piper-tts training code!
-- Remember tho that the dataset generator thing repo you linked makes the names of the files in the dataset in the metadata.csvfile like this "wavs/1272-128104-0000.wav" But the LJspeech trainers all appear to want it like this "1272-128104-0000", So you should probs make the dataset generating function your making take that into account and have the final metatdata.csv file that it'll use to pass into the many trainer functions.
-- I plan on giving this a gradio gui potentially,
-#### Step 1:
-- Select model to fine-tune
-- Give input audio file/files
-- Press process and create dataset
-#### Step 2: (Once Process dataset has been completed)
-- Change any training parameters/config from standard training config for that selected model
-- Press Train model
-#### Step 3: (once training is complete)
-- Load trained model
-- Test influencing the trained/fine-tuned model 
-- Export model & zipped dataset OR Export condensed model & zipped dataset
-#### That's it! Planned to be simple as that! 🎉
+Point the app at audio files or a folder of audio.
 
-- Another Goal of this it to have it automatically be able to work on cpu and GPU, auto-selecting to whichever one is avalible
+- If you provide a transcript map (`csv`, `tsv`, `txt`, or `json`), it uses that text.
+- If you do not provide text, it transcribes with Whisper and chunks longer recordings into sentence-sized clips.
+- It writes an LJSpeech-style dataset under:
 
-
-# Dataset creater checklist
-
-- [x] modify formatter.py
-- [ ] modify gradio gui to function with the new formatter.py and make all the output files into the datset folder
-- [ ] metadata_shuf.csv
-- [ ] metadata_train.csv
-- [ ] metadata_val.csv
-- [ ] metadata.csv
-- [ ] rename the dataset folder to LJSpeech-1.1
-- [ ] remove extra unessisary parts of gradio gui
-
-
-
-## download_ljspeech.sh: --->
-
-```bash
-#!/bin/bash
-# take the scripts's parent's directory to prefix all the output paths.
-RUN_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-echo $RUN_DIR
-# download LJSpeech dataset
-wget http://data.keithito.com/data/speech/LJSpeech-1.1.tar.bz2
-# extract
-tar -xjf LJSpeech-1.1.tar.bz2
-# create train-val splits
-shuf LJSpeech-1.1/metadata.csv > LJSpeech-1.1/metadata_shuf.csv
-head -n 12000 LJSpeech-1.1/metadata_shuf.csv > LJSpeech-1.1/metadata_train.csv
-tail -n 1100 LJSpeech-1.1/metadata_shuf.csv > LJSpeech-1.1/metadata_val.csv
-mv LJSpeech-1.1 $RUN_DIR/recipes/ljspeech/
-rm LJSpeech-1.1.tar.bz2
+```text
+<output_root>/dataset/LJSpeech-1.1/
 ```
 
+including:
+- `wavs/`
+- `metadata.csv`
+- `metadata_shuf.csv`
+- `metadata_train.csv`
+- `metadata_val.csv`
+- `dataset_info.json`
+
+### 2. Train or fine-tune a model
+
+Pick one of the supported Coqui recipes, then train from the GUI or CLI.
+
+Training artifacts are written under:
+
+```text
+<output_root>/training_runs/<model>/<timestamp>/ready/
+```
+
+with an `artifacts.json` file that the GUI and CLI can load later.
+
+### 3. Test the trained model
+
+After training, load the generated `artifacts.json` (or the training folder) and synthesize test audio.
+
+- XTTS models use a speaker reference WAV.
+- Single-speaker recipe models synthesize directly.
+
+## Install
+
+### Linux / macOS
+
+```bash
+bash install.sh
+```
+
+### Windows
+
+```bat
+install.bat
+```
+
+## Run the web GUI
+
+### Linux / macOS
+
+```bash
+bash start.sh
+```
+
+### Windows
+
+```bat
+start.bat
+```
+
+You can also run it directly:
+
+```bash
+python xtts_demo.py --port 5003 --out_path /absolute/path/to/output
+```
+
+## Headless CLI
+
+List models:
+
+```bash
+python headless_cli.py list-models
+```
+
+Prepare a dataset from a folder of audio and auto-transcribe with Whisper:
+
+```bash
+python headless_cli.py prepare-dataset \
+  --output-root /absolute/path/to/output \
+  --audio-dir /absolute/path/to/audio \
+  --language en \
+  --whisper-model small
+```
+
+Prepare a dataset using an existing transcript file:
+
+```bash
+python headless_cli.py prepare-dataset \
+  --output-root /absolute/path/to/output \
+  --audio-dir /absolute/path/to/audio \
+  --transcript-file /absolute/path/to/metadata.csv
+```
+
+Dry-run a training workspace:
+
+```bash
+python headless_cli.py train \
+  --model xtts_v2 \
+  --output-root /absolute/path/to/output \
+  --dry-run
+```
+
+Train a model:
+
+```bash
+python headless_cli.py train \
+  --model glow_tts \
+  --output-root /absolute/path/to/output \
+  --epochs 50 \
+  --batch-size 16
+```
+
+Run the whole workflow in one command:
+
+```bash
+python headless_cli.py workflow \
+  --model xtts_v2 \
+  --output-root /absolute/path/to/output \
+  --audio-dir /absolute/path/to/audio \
+  --language en \
+  --test-text "This is a quick validation sample."
+```
+
+Generate speech from the newest trained model:
+
+```bash
+python headless_cli.py synthesize \
+  --artifacts /absolute/path/to/output \
+  --model xtts_v2 \
+  --text "Testing the fine-tuned voice." \
+  --language en
+```
+
+## Transcript file formats
+
+Accepted transcript formats:
+- `json` dictionary or list of objects
+- `csv`
+- `tsv`
+- pipe-delimited text
+
+The audio key can be an absolute path, file name, or stem. The text field can be named `text`, `transcript`, `sentence`, or `utterance`.
+
+## Notes
+
+- The workflow automatically uses CUDA when available and falls back to CPU otherwise.
+- XTTS models are the best option when you need multilingual fine-tuning or speaker-conditioned inference.
+- Some upstream Coqui recipes still depend on recipe-specific assumptions. If you need deeper tuning, use the `extra_overrides_json` field/flag to override recipe values before launch.
