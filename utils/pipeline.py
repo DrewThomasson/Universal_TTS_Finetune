@@ -721,6 +721,7 @@ def train_model(
     extra_overrides_json: str | None = None,
     dry_run: bool = False,
     progress: ProgressCallback = None,
+    stream_logs: bool = True,
 ) -> dict[str, Any]:
     spec = get_model_spec(model_key)
     dataset_root = _normalize_dataset_dir(dataset_dir, output_root)
@@ -766,22 +767,32 @@ def train_model(
         return run_summary
 
     _notify(progress, f"Starting training for {spec.label}...")
-    result = subprocess.run(
+    log_path = training_root / "training.log"
+    stdout_lines: list[str] = []
+
+    with subprocess.Popen(
         [sys.executable, str(script_path)],
         cwd=str(workspace_root),
-        check=False,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
-    )
-    stdout = result.stdout or ""
-    stderr = result.stderr or ""
-    log_path = training_root / "training.log"
-    log_path.write_text(stdout + "\n" + stderr, encoding="utf-8")
-    if result.returncode != 0:
+        bufsize=1
+    ) as process:
+        if process.stdout:
+            for line in process.stdout:
+                stdout_lines.append(line)
+                if stream_logs:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+        process.wait()
+
+    full_log = "".join(stdout_lines)
+    log_path.write_text(full_log, encoding="utf-8")
+    
+    if process.returncode != 0:
         raise RuntimeError(
             f"Training failed for {spec.label}. See {log_path}\n\n"
-            f"STDOUT:\n{_tail_text(stdout, ERROR_LOG_TAIL_CHARS)}\n\n"
-            f"STDERR:\n{_tail_text(stderr, ERROR_LOG_TAIL_CHARS)}"
+            f"LOGS:\n{_tail_text(full_log, ERROR_LOG_TAIL_CHARS)}"
         )
     artifacts = _finalize_training_artifacts(
         spec_key=model_key,

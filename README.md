@@ -98,6 +98,8 @@ The application will be available at `http://localhost:5003`.
 
 ## Headless CLI
 
+*Note: By default, the training commands (`train` and `workflow`) will stream live training logs to your console so you can see progress in real time. If you prefer to suppress this output (e.g., when running in a background job), you can pass the `--no-stream-logs` flag.*
+
 List models:
 
 ```bash
