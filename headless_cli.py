@@ -50,6 +50,7 @@ def _build_parser() -> argparse.ArgumentParser:
     train.add_argument("--extra-overrides-json")
     train.add_argument("--no-pretrained", action="store_true")
     train.add_argument("--dry-run", action="store_true")
+    train.add_argument("--no-stream-logs", action="store_true", help="Disable streaming of training logs to the console")
 
     infer = subparsers.add_parser("synthesize", help="Generate speech from the latest or selected trained model.")
     infer.add_argument("--artifacts", required=True, help="Path to artifacts.json, a ready/ folder, or an output root.")
@@ -77,6 +78,7 @@ def _build_parser() -> argparse.ArgumentParser:
     workflow.add_argument("--test-text")
     workflow.add_argument("--speaker-wav")
     workflow.add_argument("--output-file")
+    workflow.add_argument("--no-stream-logs", action="store_true", help="Disable streaming of training logs to the console")
 
     latest = subparsers.add_parser("latest-artifacts", help="Resolve the newest trained model artifacts.")
     latest.add_argument("--output-root", required=True)
@@ -122,6 +124,7 @@ def main() -> None:
             use_pretrained=not args.no_pretrained,
             extra_overrides_json=args.extra_overrides_json,
             dry_run=args.dry_run,
+            stream_logs=not args.no_stream_logs,
         )
         _print_json(result)
         return
@@ -161,6 +164,7 @@ def main() -> None:
             restore_path=args.restore_path,
             use_pretrained=not args.no_pretrained,
             extra_overrides_json=args.extra_overrides_json,
+            stream_logs=not args.no_stream_logs,
         )
         payload = {"dataset": dataset, "training": training}
         if args.test_text:
