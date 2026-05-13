@@ -11,7 +11,17 @@ import time
 import traceback
 import warnings
 from dataclasses import asdict
+import os
 from pathlib import Path
+
+_PROJECT_ROOT = Path(__file__).parent.parent.resolve()
+_MODELS_DIR = _PROJECT_ROOT / "models"
+_MODELS_DIR.mkdir(exist_ok=True)
+
+os.environ["HF_HOME"] = str(_MODELS_DIR)
+os.environ["TTS_HOME"] = str(_MODELS_DIR)
+os.environ["TORCH_HOME"] = str(_MODELS_DIR)
+
 from typing import Any, Callable, Sequence
 
 import soundfile as sf
@@ -336,7 +346,7 @@ def prepare_dataset(
         device = "cuda" if torch.cuda.is_available() else "cpu"
         compute_type = "float16" if torch.cuda.is_available() else "float32"
         _notify(progress, f"Loading Whisper model '{whisper_model_name}' on {device}...")
-        asr_model = WhisperModel(whisper_model_name, device=device, compute_type=compute_type)
+        asr_model = WhisperModel(whisper_model_name, device=device, compute_type=compute_type, download_root=str(_MODELS_DIR))
 
     entries: list[dict[str, Any]] = []
     total_seconds = 0.0
