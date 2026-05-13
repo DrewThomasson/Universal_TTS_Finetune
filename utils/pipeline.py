@@ -557,6 +557,8 @@ def _patch_recipe_script(
     source = _replace_keyword_value(source, "BATCH_SIZE", str(batch_size))
     source = _replace_keyword_value(source, "GRAD_ACUMM_STEPS", str(grad_accum))
     source = _replace_keyword_value(source, "max_wav_length", str(int(max_audio_seconds * DEFAULT_SAMPLE_RATE)))
+    source = _replace_keyword_value(source, "num_loader_workers", "0")
+    source = _replace_keyword_value(source, "num_eval_loader_workers", "0")
 
     if spec_key.startswith("xtts_"):
         source = _replace_keyword_value(source, "language", repr(language))
