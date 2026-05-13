@@ -86,6 +86,16 @@ Run the application directly with Python:
 python xtts_demo.py --port 5003 --out_path /absolute/path/to/output
 ```
 
+## Run with Docker
+
+To run the application using Docker, simply use `docker-compose`. This handles installing all system dependencies and setting up GPU support automatically:
+
+```bash
+docker-compose up --build
+```
+
+The application will be available at `http://localhost:5003`.
+
 ## Headless CLI
 
 List models:
