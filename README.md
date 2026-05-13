@@ -72,33 +72,15 @@ After training, load the generated `artifacts.json` (or the training folder) and
 
 ## Install
 
-### Linux / macOS
+Install the required dependencies using pip:
 
 ```bash
-bash install.sh
-```
-
-### Windows
-
-```bat
-install.bat
+pip install -r requirements.txt
 ```
 
 ## Run the web GUI
 
-### Linux / macOS
-
-```bash
-bash start.sh
-```
-
-### Windows
-
-```bat
-start.bat
-```
-
-You can also run it directly:
+Run the application directly with Python:
 
 ```bash
 python xtts_demo.py --port 5003 --out_path /absolute/path/to/output
