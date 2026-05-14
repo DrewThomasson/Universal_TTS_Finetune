@@ -14,6 +14,10 @@ from dataclasses import asdict
 import os
 from pathlib import Path
 
+import numpy as np
+from scipy.cluster.hierarchy import fcluster, linkage
+from scipy.spatial.distance import pdist
+
 _PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 _MODELS_DIR = _PROJECT_ROOT / "models"
 _MODELS_DIR.mkdir(exist_ok=True)
@@ -326,6 +330,7 @@ def prepare_dataset(
     min_segment_seconds: float = DEFAULT_MIN_SEGMENT_SECONDS,
     max_segment_seconds: float = DEFAULT_MAX_SEGMENT_SECONDS,
     segment_buffer_seconds: float = DEFAULT_SEGMENT_BUFFER_SECONDS,
+    diarize_speakers: bool = False,
     progress: ProgressCallback = None,
 ) -> dict[str, Any]:
     resolved_audio_files = resolve_audio_files(audio_files, audio_dir)
@@ -440,6 +445,87 @@ def prepare_dataset(
     if not entries:
         raise ValueError("No usable training samples were created from the provided audio.")
 
+    if diarize_speakers and len(entries) > 1:
+        _notify(progress, "Starting speaker diarization clustering...")
+        try:
+            model_path, _, _ = ModelManager(progress_bar=True).download_model("tts_models/multilingual/multi-dataset/xtts_v2")
+            config = XttsConfig()
+            config.load_json(os.path.join(model_path, "config.json"))
+            model = Xtts.init_from_config(config)
+            model.load_checkpoint(config, checkpoint_dir=model_path, eval=True)
+            if torch.cuda.is_available():
+                model.cuda()
+            
+            embeddings = []
+            for i, entry in enumerate(entries):
+                if i % 10 == 0:
+                    _notify(progress, f"Extracting voice blueprints: {i}/{len(entries)}")
+                # Extract 1x4096 or 1x512 embedding
+                _, speaker_embedding = model.get_conditioning_latents(audio_path=entry["audio_path"])
+                embeddings.append(speaker_embedding.squeeze().cpu().detach().numpy())
+            
+            embeddings_array = np.array(embeddings)
+            dist_matrix = pdist(embeddings_array, metric='cosine')
+            Z = linkage(dist_matrix, method='complete')
+            # 0.3 cosine distance is a reasonable threshold for distinct speakers
+            labels = fcluster(Z, t=0.3, criterion='distance')
+            
+            from collections import defaultdict
+            clusters = defaultdict(list)
+            for label, entry in zip(labels, entries):
+                clusters[label].append(entry)
+                
+            sorted_clusters = sorted(clusters.values(), key=lambda c: sum(e["duration_seconds"] for e in c), reverse=True)
+            _notify(progress, f"Found {len(sorted_clusters)} distinct speakers.")
+            
+            # Create sub-datasets
+            primary_dataset_info = None
+            for idx, cluster_entries in enumerate(sorted_clusters, start=1):
+                speaker_dataset_dir = output_root_path / "dataset" / f"LJSpeech-1.1_Speaker_{idx}"
+                speaker_wavs_dir = speaker_dataset_dir / "wavs"
+                if speaker_dataset_dir.exists():
+                    shutil.rmtree(speaker_dataset_dir)
+                speaker_wavs_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Copy wavs
+                for entry in cluster_entries:
+                    new_wav_path = speaker_wavs_dir / Path(entry["audio_path"]).name
+                    shutil.copy2(entry["audio_path"], new_wav_path)
+                    entry["audio_path"] = str(new_wav_path)
+                
+                speaker_metadata = _write_metadata_files(cluster_entries, speaker_dataset_dir, eval_percentage, shuffle_seed)
+                (speaker_dataset_dir / "lang.txt").write_text(f"{language}\n", encoding="utf-8")
+                
+                speaker_longest = max(cluster_entries, key=lambda e: e["duration_seconds"])
+                speaker_info = {
+                    "dataset_dir": str(speaker_dataset_dir),
+                    "wavs_dir": str(speaker_wavs_dir),
+                    "language": language,
+                    "sample_rate": DEFAULT_SAMPLE_RATE,
+                    "input_audio_count": len(resolved_audio_files),
+                    "created_sample_count": len(cluster_entries),
+                    "total_audio_seconds": round(sum(e["duration_seconds"] for e in cluster_entries), 2),
+                    "reference_wav": speaker_longest["audio_path"],
+                    **speaker_metadata,
+                }
+                info_path = speaker_dataset_dir / "dataset_info.json"
+                info_path.write_text(json.dumps(_json_ready(speaker_info), indent=2), encoding="utf-8")
+                speaker_info["dataset_info"] = str(info_path)
+                
+                if idx == 1:
+                    primary_dataset_info = speaker_info
+            
+            # Clean up the original mixed dataset to save space
+            shutil.rmtree(dataset_dir)
+            
+            _notify(progress, f"Diarization complete! Returning Speaker 1 dataset ({primary_dataset_info['total_audio_seconds']} seconds).")
+            return primary_dataset_info
+
+        except Exception as e:
+            _notify(progress, f"Diarization failed: {e}. Falling back to mixed dataset.")
+            traceback.print_exc()
+
+    # Fallback / Non-diarized path
     metadata_files = _write_metadata_files(entries, dataset_dir, eval_percentage, shuffle_seed)
     (dataset_dir / "lang.txt").write_text(f"{language}\n", encoding="utf-8")
 

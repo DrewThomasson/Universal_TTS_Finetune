@@ -51,6 +51,7 @@ def _build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--min-segment-seconds", type=float, default=0.5)
     prepare.add_argument("--max-segment-seconds", type=float, default=12.0)
     prepare.add_argument("--segment-buffer-seconds", type=float, default=0.2)
+    prepare.add_argument("--diarize-speakers", action="store_true", help="Automatically cluster audio into separate speaker datasets")
 
     train = subparsers.add_parser("train", help="Train or fine-tune a selected Coqui recipe.")
     train.add_argument("--model", required=True, choices=[key for key, _ in dropdown_choices()])
@@ -94,6 +95,7 @@ def _build_parser() -> argparse.ArgumentParser:
     workflow.add_argument("--speaker-wav")
     workflow.add_argument("--output-file")
     workflow.add_argument("--no-stream-logs", action="store_true", help="Disable streaming of training logs to the console")
+    workflow.add_argument("--diarize-speakers", action="store_true", help="Automatically cluster audio into separate speaker datasets")
 
     batch_test = subparsers.add_parser("batch-test", help="Test all supported models sequentially on the same dataset.")
     batch_test.add_argument("--output-root", required=True)
@@ -109,6 +111,7 @@ def _build_parser() -> argparse.ArgumentParser:
     batch_test.add_argument("--test-text", default="This is a quick validation sample from the batch test.")
     batch_test.add_argument("--discard-models", action="store_true", help="Delete model checkpoints after generating sample audio to save space.")
     batch_test.add_argument("--auto-calculate-epochs", action="store_true", help="Automatically calculate viable epochs based on dataset size and model architecture.")
+    batch_test.add_argument("--diarize-speakers", action="store_true", help="Automatically cluster audio into separate speaker datasets")
     batch_test.add_argument("--no-stream-logs", action="store_true", help="Disable streaming of training logs to the console")
     batch_test.add_argument("--extra-overrides-json")
 
@@ -138,6 +141,7 @@ def main() -> None:
             min_segment_seconds=args.min_segment_seconds,
             max_segment_seconds=args.max_segment_seconds,
             segment_buffer_seconds=args.segment_buffer_seconds,
+            diarize_speakers=args.diarize_speakers,
         )
         _print_json(result)
         return
@@ -183,6 +187,7 @@ def main() -> None:
             transcript_file=args.transcript_file,
             language=args.language,
             whisper_model_name=args.whisper_model,
+            diarize_speakers=args.diarize_speakers,
         )
         training = train_model(
             model_key=args.model,
@@ -219,6 +224,7 @@ def main() -> None:
             transcript_file=args.transcript_file,
             language=args.language,
             whisper_model_name=args.whisper_model,
+            diarize_speakers=args.diarize_speakers,
         )
         
         import shutil
