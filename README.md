@@ -155,6 +155,16 @@ python headless_cli.py workflow \
   --test-text "This is a quick validation sample."
 ```
 
+Test all supported models sequentially on a dataset, saving sample audio and discarding the checkpoints to save space:
+
+```bash
+python headless_cli.py batch-test \
+  --output-root /absolute/path/to/output \
+  --audio-dir /absolute/path/to/audio \
+  --language en \
+  --discard-models
+```
+
 Generate speech from the newest trained model:
 
 ```bash
