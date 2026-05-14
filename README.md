@@ -162,8 +162,11 @@ python headless_cli.py batch-test \
   --output-root /absolute/path/to/output \
   --audio-dir /absolute/path/to/audio \
   --language en \
-  --discard-models
+  --discard-models \
+  --auto-calculate-epochs
 ```
+
+*Note: The `--auto-calculate-epochs` flag ignores the `--epochs` argument and dynamically computes the optimal number of epochs for each model family (e.g., targeting 1,500 steps for XTTS and 15,000 steps for Tacotron2) based on the exact size of your provided dataset.*
 
 Generate speech from the newest trained model:
 

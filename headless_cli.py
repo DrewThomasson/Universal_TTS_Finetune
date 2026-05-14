@@ -19,6 +19,20 @@ def _print_json(payload: dict) -> None:
     print(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
+def _calculate_viable_epochs(model_key: str, sample_count: int, batch_size: int) -> int:
+    steps_per_epoch = max(1, sample_count // batch_size)
+    
+    if model_key.startswith("xtts_"):
+        target_steps = 1500
+    elif model_key in ["tacotron2_capacitron", "tacotron2_dca", "tacotron2_ddc", "fast_pitch", "fast_speech", "fastspeech2"]:
+        target_steps = 15000
+    else:
+        # VITS, Glow-TTS, Align TTS, DelightfulTTS, SpeedySpeech, Overflow, NeuralHMM-TTS
+        target_steps = 10000
+        
+    return max(1, target_steps // steps_per_epoch)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Headless workflow for Universal Coqui TTS fine-tuning.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -93,6 +107,7 @@ def _build_parser() -> argparse.ArgumentParser:
     batch_test.add_argument("--max-audio-seconds", type=int, default=11)
     batch_test.add_argument("--test-text", default="This is a quick validation sample from the batch test.")
     batch_test.add_argument("--discard-models", action="store_true", help="Delete model checkpoints after generating sample audio to save space.")
+    batch_test.add_argument("--auto-calculate-epochs", action="store_true", help="Automatically calculate viable epochs based on dataset size and model architecture.")
     batch_test.add_argument("--no-stream-logs", action="store_true", help="Disable streaming of training logs to the console")
     batch_test.add_argument("--extra-overrides-json")
 
@@ -213,11 +228,18 @@ def main() -> None:
         batch_results_dir.mkdir(parents=True, exist_ok=True)
         
         results = {"dataset": dataset, "models": {}}
+        sample_count = dataset.get("created_sample_count", 0)
         
         for model_key, model_label in dropdown_choices():
             print(f"\n==================================================")
             print(f"Batch testing: {model_label} ({model_key})")
             print(f"==================================================\n")
+            
+            if args.auto_calculate_epochs and sample_count > 0:
+                current_epochs = _calculate_viable_epochs(model_key, sample_count, args.batch_size)
+                print(f"Auto-calculated epochs for {model_label}: {current_epochs} (Dataset clips: {sample_count}, Batch size: {args.batch_size})")
+            else:
+                current_epochs = args.epochs
             
             try:
                 training = train_model(
@@ -225,7 +247,7 @@ def main() -> None:
                     output_root=args.output_root,
                     dataset_dir=dataset["dataset_dir"],
                     language=args.language,
-                    epochs=args.epochs,
+                    epochs=current_epochs,
                     batch_size=args.batch_size,
                     grad_accum=args.grad_accum,
                     max_audio_seconds=args.max_audio_seconds,
