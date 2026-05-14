@@ -113,8 +113,11 @@ python headless_cli.py prepare-dataset \
   --output-root /absolute/path/to/output \
   --audio-dir /absolute/path/to/audio \
   --language en \
-  --whisper-model small
+  --whisper-model small \
+  --diarize-speakers
 ```
+
+*Note: The `--diarize-speakers` flag is optional. If provided, the pipeline will extract voice blueprints for all generated audio clips and cluster them by distinct speakers. It will output separate datasets (e.g., `dataset/LJSpeech-1.1_Speaker_1/`) and default to returning the speaker with the most training data.*
 
 Prepare a dataset using an existing transcript file:
 
@@ -163,7 +166,8 @@ python headless_cli.py batch-test \
   --audio-dir /absolute/path/to/audio \
   --language en \
   --discard-models \
-  --auto-calculate-epochs
+  --auto-calculate-epochs \
+  --diarize-speakers
 ```
 
 *Note: The `--auto-calculate-epochs` flag ignores the `--epochs` argument and dynamically computes the optimal number of epochs for each model family (e.g., targeting 1,500 steps for XTTS and 15,000 steps for Tacotron2) based on the exact size of your provided dataset.*
