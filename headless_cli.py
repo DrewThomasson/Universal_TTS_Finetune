@@ -80,6 +80,22 @@ def _build_parser() -> argparse.ArgumentParser:
     workflow.add_argument("--output-file")
     workflow.add_argument("--no-stream-logs", action="store_true", help="Disable streaming of training logs to the console")
 
+    batch_test = subparsers.add_parser("batch-test", help="Test all supported models sequentially on the same dataset.")
+    batch_test.add_argument("--output-root", required=True)
+    batch_test.add_argument("--audio-dir")
+    batch_test.add_argument("--audio-file", action="append", default=[])
+    batch_test.add_argument("--transcript-file")
+    batch_test.add_argument("--language", default="en")
+    batch_test.add_argument("--whisper-model", default="small")
+    batch_test.add_argument("--epochs", type=int, default=1)
+    batch_test.add_argument("--batch-size", type=int, default=8)
+    batch_test.add_argument("--grad-accum", type=int, default=1)
+    batch_test.add_argument("--max-audio-seconds", type=int, default=11)
+    batch_test.add_argument("--test-text", default="This is a quick validation sample from the batch test.")
+    batch_test.add_argument("--discard-models", action="store_true", help="Delete model checkpoints after generating sample audio to save space.")
+    batch_test.add_argument("--no-stream-logs", action="store_true", help="Disable streaming of training logs to the console")
+    batch_test.add_argument("--extra-overrides-json")
+
     latest = subparsers.add_parser("latest-artifacts", help="Resolve the newest trained model artifacts.")
     latest.add_argument("--output-root", required=True)
     latest.add_argument("--model")
@@ -177,6 +193,80 @@ def main() -> None:
                 output_file=args.output_file or default_test_output(args.output_root),
             )
         _print_json(payload)
+        return
+
+    if args.command == "batch-test":
+        dataset = prepare_dataset(
+            output_root=args.output_root,
+            audio_dir=args.audio_dir,
+            audio_files=args.audio_file,
+            transcript_file=args.transcript_file,
+            language=args.language,
+            whisper_model_name=args.whisper_model,
+        )
+        
+        import shutil
+        from pathlib import Path
+        import traceback
+        
+        batch_results_dir = Path(args.output_root) / "batch_results"
+        batch_results_dir.mkdir(parents=True, exist_ok=True)
+        
+        results = {"dataset": dataset, "models": {}}
+        
+        for model_key, model_label in dropdown_choices():
+            print(f"\n==================================================")
+            print(f"Batch testing: {model_label} ({model_key})")
+            print(f"==================================================\n")
+            
+            try:
+                training = train_model(
+                    model_key=model_key,
+                    output_root=args.output_root,
+                    dataset_dir=dataset["dataset_dir"],
+                    language=args.language,
+                    epochs=args.epochs,
+                    batch_size=args.batch_size,
+                    grad_accum=args.grad_accum,
+                    max_audio_seconds=args.max_audio_seconds,
+                    restore_path=None,
+                    use_pretrained=True,
+                    extra_overrides_json=args.extra_overrides_json,
+                    stream_logs=not args.no_stream_logs,
+                )
+                
+                output_wav = batch_results_dir / f"{model_key}.wav"
+                
+                synthesis = synthesize(
+                    artifacts_path_or_dir=training["training_root"],
+                    model_key=model_key,
+                    text=args.test_text,
+                    language=args.language,
+                    speaker_wav=None,
+                    output_file=str(output_wav),
+                )
+                
+                results["models"][model_key] = {
+                    "status": "success",
+                    "training": training,
+                    "synthesis": synthesis,
+                    "sample_audio": str(output_wav)
+                }
+                
+                if args.discard_models:
+                    print(f"Discarding model artifacts for {model_key} to save space...")
+                    shutil.rmtree(training["training_root"], ignore_errors=True)
+                    results["models"][model_key]["discarded"] = True
+                    
+            except Exception as e:
+                print(f"FAILED to test {model_key}: {e}")
+                traceback.print_exc()
+                results["models"][model_key] = {
+                    "status": "error",
+                    "error_message": str(e)
+                }
+                
+        _print_json(results)
         return
 
     if args.command == "latest-artifacts":
