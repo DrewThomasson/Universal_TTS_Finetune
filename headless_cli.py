@@ -12,6 +12,7 @@ from utils.pipeline import (
     prepare_dataset,
     synthesize,
     train_model,
+    _json_ready,
 )
 
 
@@ -277,6 +278,13 @@ def main() -> None:
                 
                 if args.discard_models:
                     print(f"Discarding model artifacts for {model_key} to save space...")
+                    
+                    # Preserve the log file before deleting
+                    log_file = Path(training["training_root"]) / "training.log"
+                    if log_file.exists():
+                        dest_log = batch_results_dir / f"{model_key}_training.log"
+                        shutil.copy2(log_file, dest_log)
+                        
                     shutil.rmtree(training["training_root"], ignore_errors=True)
                     results["models"][model_key]["discarded"] = True
                     
@@ -288,6 +296,11 @@ def main() -> None:
                     "error_message": str(e)
                 }
                 
+        # Save the full batch summary to a file
+        summary_path = batch_results_dir / "batch_summary.json"
+        summary_path.write_text(json.dumps(_json_ready(results), indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"\nBatch test complete! Summary saved to: {summary_path}")
+        
         _print_json(results)
         return
 
