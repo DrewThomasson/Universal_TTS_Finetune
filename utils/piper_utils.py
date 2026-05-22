@@ -375,11 +375,13 @@ def train_piper_model(
         "--validation-split", "0.0",
         "--num-test-examples", "0",
         "--max_epochs", str(epochs),
-        "--resume_from_checkpoint", str(base_ckpt_path),
         "--checkpoint-epochs", "1",
         "--precision", "32",
         "--quality", quality
     ]
+    if base_ckpt_path:
+        cmd.extend(["--resume_from_checkpoint", str(base_ckpt_path)])
+
     
     if progress_callback:
         progress_callback("Launching Piper training...")
