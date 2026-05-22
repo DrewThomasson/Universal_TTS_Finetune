@@ -4,7 +4,6 @@ __pycache__/
 venv/
 finetune_models/
 models/
-piper/
 test_out/
 test_transcript.json
 .DS_Store
