@@ -161,6 +161,15 @@ MODEL_SPECS = (
         supports_language=True,
         requires_speaker_wav=True,
     ),
+    ModelSpec(
+        key="piper",
+        label="Piper TTS",
+        recipe_dir="piper",
+        train_script="piper_train",
+        family="piper",
+        supports_language=True,
+        requires_speaker_wav=False,
+    ),
 )
 
 MODEL_SPECS_BY_KEY = {spec.key: spec for spec in MODEL_SPECS}
