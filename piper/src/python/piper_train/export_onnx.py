@@ -45,7 +45,7 @@ def main() -> None:
     args.output = Path(args.output)
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
-    model = VitsModel.load_from_checkpoint(args.checkpoint, dataset=None)
+    model = VitsModel.load_from_checkpoint(args.checkpoint, dataset=None, map_location="cpu")
     model_g = model.model_g
 
     num_symbols = model_g.n_vocab

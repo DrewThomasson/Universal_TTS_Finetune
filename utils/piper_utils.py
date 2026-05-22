@@ -248,6 +248,96 @@ def preprocess_piper_dataset(dataset_dir: Path, output_dir: Path, language_code:
     print(f"Running Piper preprocessing: {' '.join(cmd)}")
     subprocess.run(cmd, env=env, check=True)
 
+def _check_and_generate_piper_sample(
+    preprocessed_dir: Path,
+    sample_epoch_interval: int,
+    sample_text: str,
+    config_path: Path,
+    output_dir: Path,
+    generated_epochs: set[int],
+    progress_callback=None
+):
+    import re
+    # Check for any .ckpt file under preprocessed_dir or its lightning_logs subdirectories
+    ckpt_files = list(preprocessed_dir.glob("epoch=*-step=*.ckpt"))
+    ckpt_files.extend(list((preprocessed_dir / "lightning_logs").glob("**/*.ckpt")))
+    
+    for ckpt in ckpt_files:
+        if not ckpt.exists():
+            continue
+        # Parse the epoch index (e.g. epoch=99-step=1200.ckpt)
+        match = re.search(r"epoch=(\d+)-step=", ckpt.name)
+        if match:
+            epoch_idx = int(match.group(1))
+            epoch_num = epoch_idx + 1 # Convert to 1-based epoch number
+            if epoch_num % sample_epoch_interval == 0 and epoch_num not in generated_epochs:
+                # Double check existence to avoid race condition
+                if not ckpt.exists():
+                    continue
+                generated_epochs.add(epoch_num)
+                temp_ckpt = None
+                try:
+                    samples_dir = output_dir / "epoch_samples"
+                    samples_dir.mkdir(parents=True, exist_ok=True)
+                    temp_ckpt = samples_dir / f"epoch_{epoch_num}_temp.ckpt"
+                    temp_onnx = samples_dir / f"epoch_{epoch_num}_temp.onnx"
+                    temp_config = samples_dir / f"epoch_{epoch_num}_temp.onnx.json"
+                    
+                    # Notify
+                    msg = f"\n>>> [Periodic Audio Sample] Copying checkpoint for Epoch {epoch_num} to prevent race conditions... <<<\n"
+                    print(msg)
+                    sys.stdout.flush()
+                    if progress_callback:
+                        progress_callback(msg)
+                        
+                    # Copy checkpoint file to temporary path immediately
+                    shutil.copy2(ckpt, temp_ckpt)
+                    
+                    msg = f">>> Exporting checkpoint for Epoch {epoch_num} to ONNX... <<<\n"
+                    print(msg)
+                    sys.stdout.flush()
+                    if progress_callback:
+                        progress_callback(msg)
+                        
+                    # Export to ONNX using our copied file
+                    export_piper_onnx(temp_ckpt, temp_onnx, config_path)
+                    
+                    # Synthesize
+                    out_wav = samples_dir / f"epoch_{epoch_num}.wav"
+                    msg = f">>> Synthesizing audio sample for Epoch {epoch_num}... <<<\n"
+                    print(msg)
+                    sys.stdout.flush()
+                    if progress_callback:
+                        progress_callback(msg)
+                        
+                    synthesize_piper(str(temp_onnx), str(temp_config), sample_text, str(out_wav))
+                    
+                    # Clean up temp files
+                    if temp_onnx.exists():
+                        temp_onnx.unlink()
+                    if temp_config.exists():
+                        temp_config.unlink()
+                    if temp_ckpt and temp_ckpt.exists():
+                        temp_ckpt.unlink()
+                        
+                    done_msg = f">>> Saved audio sample to: {out_wav} <<<\n\n"
+                    print(done_msg)
+                    sys.stdout.flush()
+                    if progress_callback:
+                        progress_callback(done_msg)
+                except Exception as e:
+                    # Cleanup on failure
+                    if temp_ckpt and temp_ckpt.exists():
+                        try:
+                            temp_ckpt.unlink()
+                        except Exception:
+                            pass
+                    err_msg = f"Warning: Failed to generate epoch sample for Epoch {epoch_num}: {e}\n"
+                    print(err_msg)
+                    sys.stdout.flush()
+                    if progress_callback:
+                        progress_callback(err_msg)
+
 def train_piper_model(
     preprocessed_dir: Path,
     base_ckpt_path: Path,
@@ -255,7 +345,11 @@ def train_piper_model(
     batch_size: int,
     quality: str = "medium",
     stream_logs: bool = True,
-    progress_callback=None
+    progress_callback=None,
+    sample_epoch_interval: int = 0,
+    sample_text: str = "",
+    config_path: Path | None = None,
+    output_dir: Path | None = None,
 ) -> str:
     """Invokes pytorch-lightning training via piper_train as a subprocess."""
     piper_python_src = Path(__file__).resolve().parent.parent / "piper" / "src" / "python"
@@ -302,6 +396,11 @@ def train_piper_model(
     )
     
     log_lines = []
+    generated_epochs = set()
+    import time
+    last_check_time = 0.0
+    last_dir_mtime = 0.0
+
     if process.stdout:
         for line in process.stdout:
             log_lines.append(line)
@@ -310,7 +409,41 @@ def train_piper_model(
                 sys.stdout.flush()
             if progress_callback:
                 progress_callback(line)
+            
+            # Scan for checkpoints to generate progress audio samples
+            if sample_epoch_interval > 0 and config_path and output_dir:
+                current_time = time.time()
+                if (current_time - last_check_time) > 0.5:
+                    last_check_time = current_time
+                    try:
+                        current_mtime = preprocessed_dir.stat().st_mtime
+                    except Exception:
+                        current_mtime = 0.0
+                    if current_mtime != last_dir_mtime:
+                        last_dir_mtime = current_mtime
+                        _check_and_generate_piper_sample(
+                            preprocessed_dir=preprocessed_dir,
+                            sample_epoch_interval=sample_epoch_interval,
+                            sample_text=sample_text,
+                            config_path=config_path,
+                            output_dir=output_dir,
+                            generated_epochs=generated_epochs,
+                            progress_callback=progress_callback
+                        )
+
     process.wait()
+    
+    # Run a final check to ensure we capture the final checkpoints
+    if sample_epoch_interval > 0 and config_path and output_dir:
+        _check_and_generate_piper_sample(
+            preprocessed_dir=preprocessed_dir,
+            sample_epoch_interval=sample_epoch_interval,
+            sample_text=sample_text,
+            config_path=config_path,
+            output_dir=output_dir,
+            generated_epochs=generated_epochs,
+            progress_callback=progress_callback
+        )
     
     if process.returncode != 0:
         raise RuntimeError(f"Piper training subprocess failed with code {process.returncode}")

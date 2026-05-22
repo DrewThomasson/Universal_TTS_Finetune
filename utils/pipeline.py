@@ -818,6 +818,8 @@ def train_model(
     dry_run: bool = False,
     progress: ProgressCallback = None,
     stream_logs: bool = True,
+    sample_epoch_interval: int = 0,
+    sample_text: str = "",
 ) -> dict[str, Any]:
     spec = get_model_spec(model_key)
     dataset_root = _normalize_dataset_dir(dataset_dir, output_root)
@@ -905,7 +907,11 @@ def train_model(
                 batch_size=batch_size,
                 quality=quality,
                 stream_logs=stream_logs,
-                progress_callback=progress
+                progress_callback=progress,
+                sample_epoch_interval=sample_epoch_interval,
+                sample_text=sample_text,
+                config_path=config_path,
+                output_dir=training_root
             )
             log_path.write_text(log_output, encoding="utf-8")
         except Exception as e:
