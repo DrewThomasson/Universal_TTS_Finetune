@@ -331,6 +331,7 @@ def prepare_dataset(
     max_segment_seconds: float = DEFAULT_MAX_SEGMENT_SECONDS,
     segment_buffer_seconds: float = DEFAULT_SEGMENT_BUFFER_SECONDS,
     diarize_speakers: bool = False,
+    dataset_name: str = "LJSpeech-1.1",
     progress: ProgressCallback = None,
 ) -> dict[str, Any]:
     resolved_audio_files = resolve_audio_files(audio_files, audio_dir)
@@ -338,7 +339,8 @@ def prepare_dataset(
         raise ValueError("No audio files found. Provide files directly or point to a folder that contains audio.")
 
     output_root_path = _resolve_user_path(output_root, expect_directory=True)
-    dataset_dir = output_root_path / "dataset" / "LJSpeech-1.1"
+    dataset_name = dataset_name or "LJSpeech-1.1"
+    dataset_dir = output_root_path / "dataset" / dataset_name
     wavs_dir = dataset_dir / "wavs"
     if dataset_dir.exists():
         shutil.rmtree(dataset_dir)
@@ -399,7 +401,8 @@ def prepare_dataset(
         )
         words = _extract_transcribed_words(segments)
         if not words:
-            raise ValueError(f"Whisper did not return timestamped words for {audio_path.name}")
+            _notify(progress, f"Warning: Whisper did not return timestamped words for {audio_path.name}. Skipping this file.")
+            continue
 
         clip_index = 0
         sentence_words: list[Any] = []
@@ -480,8 +483,9 @@ def prepare_dataset(
             
             # Create sub-datasets
             primary_dataset_info = None
+            all_speakers = []
             for idx, cluster_entries in enumerate(sorted_clusters, start=1):
-                speaker_dataset_dir = output_root_path / "dataset" / f"LJSpeech-1.1_Speaker_{idx}"
+                speaker_dataset_dir = output_root_path / "dataset" / f"{dataset_name}_Speaker_{idx}"
                 speaker_wavs_dir = speaker_dataset_dir / "wavs"
                 if speaker_dataset_dir.exists():
                     shutil.rmtree(speaker_dataset_dir)
@@ -512,13 +516,15 @@ def prepare_dataset(
                 info_path.write_text(json.dumps(_json_ready(speaker_info), indent=2), encoding="utf-8")
                 speaker_info["dataset_info"] = str(info_path)
                 
+                all_speakers.append(speaker_info)
                 if idx == 1:
                     primary_dataset_info = speaker_info
             
             # Clean up the original mixed dataset to save space
             shutil.rmtree(dataset_dir)
             
-            _notify(progress, f"Diarization complete! Returning Speaker 1 dataset ({primary_dataset_info['total_audio_seconds']} seconds).")
+            primary_dataset_info["all_speakers"] = all_speakers
+            _notify(progress, f"Diarization complete! Found {len(all_speakers)} speaker(s). Returning Speaker 1 dataset ({primary_dataset_info['total_audio_seconds']} seconds).")
             return primary_dataset_info
 
         except Exception as e:
@@ -543,6 +549,7 @@ def prepare_dataset(
     info_path = dataset_dir / "dataset_info.json"
     info_path.write_text(json.dumps(_json_ready(dataset_info), indent=2), encoding="utf-8")
     dataset_info["dataset_info"] = str(info_path)
+    _notify(progress, f"Dataset creation complete! Created {dataset_info['created_sample_count']} samples.")
     return dataset_info
 
 
@@ -996,6 +1003,8 @@ def train_model(
                 if stream_logs:
                     sys.stdout.write(line)
                     sys.stdout.flush()
+                if progress:
+                    progress(line)
         process.wait()
 
     full_log = "".join(stdout_lines)
