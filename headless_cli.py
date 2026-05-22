@@ -15,6 +15,19 @@ if not hasattr(importlib.machinery.FileFinder, "find_module"):
         return spec.loader if spec is not None else None
     importlib.machinery.FileFinder.find_module = find_module_shim
 
+# Patch PyTorch 2.6+ to default to weights_only=False in torch.load for compatibility with older checkpoints
+try:
+    import torch
+    if hasattr(torch, "load"):
+        original_load = torch.load
+        def patched_load(*args, **kwargs):
+            if "weights_only" not in kwargs:
+                kwargs["weights_only"] = False
+            return original_load(*args, **kwargs)
+        torch.load = patched_load
+except ImportError:
+    pass
+
 import argparse
 import json
 
