@@ -67,6 +67,8 @@ def _build_parser() -> argparse.ArgumentParser:
     train.add_argument("--no-pretrained", action="store_true")
     train.add_argument("--dry-run", action="store_true")
     train.add_argument("--no-stream-logs", action="store_true", help="Disable streaming of training logs to the console")
+    train.add_argument("--sample-epoch-interval", type=int, default=0, help="Generate and save an audio sample every N epochs. Set to 0 to disable.")
+    train.add_argument("--sample-text", default="", help="Text sentence to synthesize at each interval.")
 
     infer = subparsers.add_parser("synthesize", help="Generate speech from the latest or selected trained model.")
     infer.add_argument("--artifacts", required=True, help="Path to artifacts.json, a ready/ folder, or an output root.")
@@ -96,6 +98,8 @@ def _build_parser() -> argparse.ArgumentParser:
     workflow.add_argument("--output-file")
     workflow.add_argument("--no-stream-logs", action="store_true", help="Disable streaming of training logs to the console")
     workflow.add_argument("--diarize-speakers", action="store_true", help="Automatically cluster audio into separate speaker datasets")
+    workflow.add_argument("--sample-epoch-interval", type=int, default=0, help="Generate and save an audio sample every N epochs. Set to 0 to disable.")
+    workflow.add_argument("--sample-text", default="", help="Text sentence to synthesize at each interval.")
 
     batch_test = subparsers.add_parser("batch-test", help="Test all supported models sequentially on the same dataset.")
     batch_test.add_argument("--output-root", required=True)
@@ -161,6 +165,8 @@ def main() -> None:
             extra_overrides_json=args.extra_overrides_json,
             dry_run=args.dry_run,
             stream_logs=not args.no_stream_logs,
+            sample_epoch_interval=args.sample_epoch_interval,
+            sample_text=args.sample_text,
         )
         _print_json(result)
         return
@@ -202,6 +208,8 @@ def main() -> None:
             use_pretrained=not args.no_pretrained,
             extra_overrides_json=args.extra_overrides_json,
             stream_logs=not args.no_stream_logs,
+            sample_epoch_interval=args.sample_epoch_interval,
+            sample_text=args.sample_text,
         )
         payload = {"dataset": dataset, "training": training}
         if args.test_text:
