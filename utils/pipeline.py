@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+# Patch pkgutil.ImpImporter for Python 3.12 compatibility with older pkg_resources / setuptools
+import pkgutil
+if not hasattr(pkgutil, "ImpImporter"):
+    class DummyImpImporter:
+        pass
+    pkgutil.ImpImporter = DummyImpImporter
+
 import csv
 import json
 import random
@@ -14,10 +21,6 @@ from dataclasses import asdict
 import os
 from pathlib import Path
 
-import numpy as np
-from scipy.cluster.hierarchy import fcluster, linkage
-from scipy.spatial.distance import pdist
-
 _PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 _MODELS_DIR = _PROJECT_ROOT / "models"
 _MODELS_DIR.mkdir(exist_ok=True)
@@ -25,6 +28,44 @@ _MODELS_DIR.mkdir(exist_ok=True)
 os.environ["HF_HOME"] = str(_MODELS_DIR)
 os.environ["TTS_HOME"] = str(_MODELS_DIR)
 os.environ["TORCH_HOME"] = str(_MODELS_DIR)
+
+_CURRENT_PROCESS: subprocess.Popen | None = None
+
+def register_active_process(proc: subprocess.Popen | None):
+    global _CURRENT_PROCESS
+    _CURRENT_PROCESS = proc
+
+def pause_training() -> str:
+    global _CURRENT_PROCESS
+    if not _CURRENT_PROCESS or _CURRENT_PROCESS.poll() is not None:
+        return "No training process is currently active."
+    try:
+        import signal
+        if hasattr(os, "killpg"):
+            os.killpg(os.getpgid(_CURRENT_PROCESS.pid), signal.SIGSTOP)
+        else:
+            _CURRENT_PROCESS.send_signal(signal.SIGSTOP)
+        return "Training process paused successfully."
+    except Exception as e:
+        return f"Error pausing training: {e}"
+
+def resume_training() -> str:
+    global _CURRENT_PROCESS
+    if not _CURRENT_PROCESS or _CURRENT_PROCESS.poll() is not None:
+        return "No training process is currently active."
+    try:
+        import signal
+        if hasattr(os, "killpg"):
+            os.killpg(os.getpgid(_CURRENT_PROCESS.pid), signal.SIGCONT)
+        else:
+            _CURRENT_PROCESS.send_signal(signal.SIGCONT)
+        return "Training process resumed successfully."
+    except Exception as e:
+        return f"Error resuming training: {e}"
+
+import numpy as np
+from scipy.cluster.hierarchy import fcluster, linkage
+from scipy.spatial.distance import pdist
 
 from typing import Any, Callable, Sequence
 
@@ -995,14 +1036,17 @@ def train_model(
     log_path = training_root / "training.log"
     stdout_lines: list[str] = []
 
-    with subprocess.Popen(
+    process = subprocess.Popen(
         [sys.executable, str(script_path)],
         cwd=str(workspace_root),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        bufsize=1
-    ) as process:
+        bufsize=1,
+        start_new_session=True
+    )
+    register_active_process(process)
+    try:
         if process.stdout:
             for line in process.stdout:
                 stdout_lines.append(line)
@@ -1012,6 +1056,8 @@ def train_model(
                 if progress:
                     progress(line)
         process.wait()
+    finally:
+        register_active_process(None)
 
     full_log = "".join(stdout_lines)
     log_path.write_text(full_log, encoding="utf-8")

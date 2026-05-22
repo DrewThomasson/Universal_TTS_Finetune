@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+# Patch pkgutil.ImpImporter for Python 3.12 compatibility with older pkg_resources / setuptools
+import pkgutil
+if not hasattr(pkgutil, "ImpImporter"):
+    class DummyImpImporter:
+        pass
+    pkgutil.ImpImporter = DummyImpImporter
+
 import argparse
 import json
 
