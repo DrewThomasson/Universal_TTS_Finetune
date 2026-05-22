@@ -8,3 +8,4 @@ __pycache__/
 test_transcript.json
 .DS_Store
 **/ .DS_Store
+.venv/

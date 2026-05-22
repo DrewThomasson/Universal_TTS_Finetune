@@ -11,7 +11,7 @@ import torch
 
 def ensure_monotonic_align_compiled():
     """Auto-compiles the monotonic_align Cython extension for Piper training if not already compiled."""
-    base_dir = Path(__file__).resolve().parent.parent / "piper" / "src" / "python" / "piper_train" / "vits" / "monotonic_align"
+    base_dir = Path(__file__).resolve().parent.parent / "piper" / "piper_train" / "vits" / "monotonic_align"
     target_dir = base_dir / "monotonic_align"
     target_dir.mkdir(exist_ok=True)
     
@@ -231,7 +231,7 @@ def preprocess_piper_dataset(dataset_dir: Path, output_dir: Path, language_code:
     # Normalize language code to prevent eSpeak voice setup failures
     normalized_lang = normalize_espeak_language(language_code)
     
-    piper_python_src = Path(__file__).resolve().parent.parent / "piper" / "src" / "python"
+    piper_python_src = Path(__file__).resolve().parent.parent / "piper"
     env = os.environ.copy()
     env["PYTHONPATH"] = str(piper_python_src) + (os.pathsep + env.get("PYTHONPATH", "") if env.get("PYTHONPATH") else "")
     
@@ -352,7 +352,7 @@ def train_piper_model(
     output_dir: Path | None = None,
 ) -> str:
     """Invokes pytorch-lightning training via piper_train as a subprocess."""
-    piper_python_src = Path(__file__).resolve().parent.parent / "piper" / "src" / "python"
+    piper_python_src = Path(__file__).resolve().parent.parent / "piper"
     env = os.environ.copy()
     env["PYTHONPATH"] = str(piper_python_src) + (os.pathsep + env.get("PYTHONPATH", "") if env.get("PYTHONPATH") else "")
     
@@ -468,7 +468,7 @@ def train_piper_model(
 
 def export_piper_onnx(ckpt_path: Path, onnx_path: Path, config_path: Path):
     """Exports PyTorch Lightning checkpoint to ONNX format and copies its configuration file."""
-    piper_python_src = Path(__file__).resolve().parent.parent / "piper" / "src" / "python"
+    piper_python_src = Path(__file__).resolve().parent.parent / "piper"
     env = os.environ.copy()
     env["PYTHONPATH"] = str(piper_python_src) + (os.pathsep + env.get("PYTHONPATH", "") if env.get("PYTHONPATH") else "")
     
@@ -490,7 +490,7 @@ def synthesize_piper(onnx_path: str, config_path: str, text: str, output_wav_pat
     """Generates speech wav file using ONNX Runtime and piper python_run scripts."""
     import wave
     
-    piper_run_src = Path(__file__).resolve().parent.parent / "piper" / "src" / "python_run"
+    piper_run_src = Path(__file__).resolve().parent.parent / "piper"
     if str(piper_run_src) not in sys.path:
         sys.path.insert(0, str(piper_run_src))
         
