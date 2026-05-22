@@ -1,11 +1,19 @@
 from __future__ import annotations
 
-# Patch pkgutil.ImpImporter for Python 3.12 compatibility with older pkg_resources / setuptools
+# Patch pkgutil.ImpImporter and importlib.machinery.FileFinder.find_module for Python 3.12 compatibility with older pkg_resources / setuptools
 import pkgutil
+import importlib.machinery
+
 if not hasattr(pkgutil, "ImpImporter"):
     class DummyImpImporter:
         pass
     pkgutil.ImpImporter = DummyImpImporter
+
+if not hasattr(importlib.machinery.FileFinder, "find_module"):
+    def find_module_shim(self, fullname, path=None):
+        spec = self.find_spec(fullname, path)
+        return spec.loader if spec is not None else None
+    importlib.machinery.FileFinder.find_module = find_module_shim
 
 import argparse
 import json
