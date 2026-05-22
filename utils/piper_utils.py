@@ -308,6 +308,8 @@ def train_piper_model(
             if stream_logs:
                 sys.stdout.write(line)
                 sys.stdout.flush()
+            if progress_callback:
+                progress_callback(line)
     process.wait()
     
     if process.returncode != 0:
