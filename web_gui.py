@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+# Patch pkgutil.ImpImporter for Python 3.12 compatibility with older pkg_resources / setuptools
+import pkgutil
+if not hasattr(pkgutil, "ImpImporter"):
+    class DummyImpImporter:
+        pass
+    pkgutil.ImpImporter = DummyImpImporter
+
 import argparse
 import os
 import re
@@ -17,6 +24,8 @@ from utils.pipeline import (
     prepare_dataset,
     synthesize,
     train_model,
+    pause_training,
+    resume_training,
 )
 
 LANGUAGE_CHOICES = [
@@ -76,6 +85,7 @@ class TrainingProgressTracker:
         self.progress_bar = progress_bar
         self.total_epochs = total_epochs
         self.current_epoch = 0
+        self.start_epoch = None
         
     def __call__(self, log_line: str) -> None:
         if "complete" in log_line.lower() or "finished" in log_line.lower():
@@ -84,23 +94,39 @@ class TrainingProgressTracker:
             
         epoch_match = re.search(r"Epoch\s+(\d+)\s*/\s*(\d+)", log_line)
         if epoch_match:
-            self.current_epoch = int(epoch_match.group(1))
-            self.total_epochs = int(epoch_match.group(2))
+            epoch_num = int(epoch_match.group(1))
+            total_num = int(epoch_match.group(2))
+            if self.start_epoch is None:
+                self.start_epoch = epoch_num
+            self.current_epoch = epoch_num
+            self.total_epochs = max(total_num - self.start_epoch, 1)
+            relative_epoch = self.current_epoch - self.start_epoch
         else:
             epoch_match2 = re.search(r"Epoch\s*:\s*(\d+)", log_line, re.IGNORECASE)
             if not epoch_match2:
                 epoch_match2 = re.search(r"epoch\s*=\s*(\d+)", log_line, re.IGNORECASE)
             if epoch_match2:
-                self.current_epoch = int(epoch_match2.group(1))
+                epoch_num = int(epoch_match2.group(1))
+                if self.start_epoch is None:
+                    self.start_epoch = epoch_num
+                self.current_epoch = epoch_num
+                relative_epoch = self.current_epoch - self.start_epoch
+            else:
+                relative_epoch = None
                 
-        if self.total_epochs > 0 and self.current_epoch > 0:
-            fraction = min(self.current_epoch / self.total_epochs, 1.0)
-            self.progress_bar(fraction, desc=f"Training: Epoch {self.current_epoch}/{self.total_epochs}")
+        if relative_epoch is not None and self.total_epochs > 0:
+            fraction = min(max(relative_epoch / self.total_epochs, 0.0), 1.0)
+            self.progress_bar(fraction, desc=f"Training: Epoch {self.current_epoch}/{self.total_epochs + (self.start_epoch or 0)}")
         else:
             clean = log_line.strip()
             if clean:
                 desc = clean[:60] + "..." if len(clean) > 60 else clean
-                fraction = min(self.current_epoch / self.total_epochs, 1.0) if self.total_epochs > 0 and self.current_epoch > 0 else 0.0
+                if self.total_epochs > 0 and self.current_epoch > 0:
+                    start = self.start_epoch or 0
+                    rel = self.current_epoch - start
+                    fraction = min(max(rel / self.total_epochs, 0.0), 1.0)
+                else:
+                    fraction = 0.0
                 self.progress_bar(fraction, desc=desc)
 
 
@@ -207,6 +233,41 @@ def update_trained_models(out_root: str | None, model_key: str | None) -> gr.Dro
     choices = list_trained_models(out_root, model_key)
     val = choices[0][1] if choices else ""
     return gr.update(choices=choices, value=val)
+
+
+def update_resume_models(out_root: str | None, model_key: str | None) -> gr.Dropdown:
+    choices = [("None", "")] + list_trained_models(out_root, model_key)
+    return gr.update(choices=choices, value="")
+
+
+def resolve_resume_checkpoint(artifacts_file_path: str) -> str:
+    if not artifacts_file_path:
+        return ""
+    try:
+        with open(artifacts_file_path, "r", encoding="utf-8") as f:
+            artifacts = json.load(f)
+        family = artifacts.get("family")
+        training_root = Path(artifacts.get("training_root"))
+        
+        if family == "piper":
+            # Search for .ckpt files in the training root (or preprocessed/lightning_logs)
+            from utils.pipeline import _latest_matching_file
+            ckpt = _latest_matching_file(training_root, ["**/*.ckpt", "*.ckpt"])
+            if ckpt:
+                return str(ckpt.resolve())
+        else:
+            # Search for best_model.pth or other .pth files in workspace
+            from utils.pipeline import _latest_matching_file
+            pth = _latest_matching_file(training_root / "workspace", ["**/best_model.pth", "**/*.pth"])
+            if pth:
+                return str(pth.resolve())
+            # Fallback to ready checkpoint if workspace is cleaned up or empty
+            ready_pth = Path(artifacts.get("checkpoint"))
+            if ready_pth.exists():
+                return str(ready_pth.resolve())
+    except Exception as e:
+        print(f"Error resolving resume checkpoint: {e}")
+    return ""
 
 
 def _path_value(value):
@@ -323,9 +384,10 @@ def run_training(model_key, dataset_dir, language, num_epochs, batch_size, grad_
             result.get("reference_wav", ""),
             model_key,
             gr.update(choices=updated_models, value=new_val),
+            gr.update(choices=[("None", "")] + updated_models, value=""),
         )
     except Exception as exc:
-        return format_exception(exc), "", "", "", "", "", "", "", model_key, gr.update()
+        return format_exception(exc), "", "", "", "", "", "", "", model_key, gr.update(), gr.update()
 
 
 def locate_artifacts(out_path, model_key):
@@ -429,7 +491,7 @@ def preprocess_and_train(
         status_msg, dataset_dir = preprocess_res[0], preprocess_res[1]
         if not dataset_dir or "failed" in status_msg.lower():
             train_status_msg = f"Training skipped because dataset preparation failed: {status_msg}"
-            empty_train = (train_status_msg, "", "", "", "", "", "", "", model_key, gr.update())
+            empty_train = (train_status_msg, "", "", "", "", "", "", "", model_key, gr.update(), gr.update())
             empty_infer = (f"Inference skipped: Preprocessing failed.", None, None)
             return empty_train + preprocess_res + empty_infer
             
@@ -456,7 +518,7 @@ def preprocess_and_train(
         return train_res + preprocess_res + infer_res
     except Exception as exc:
         err = format_exception(exc)
-        empty_train = (f"Pipeline error: {err}", "", "", "", "", "", "", "", model_key, gr.update())
+        empty_train = (f"Pipeline error: {err}", "", "", "", "", "", "", "", model_key, gr.update(), gr.update())
         empty_prep = (err, "", "", "", "", gr.update(choices=list_datasets(out_path), value=""), "", gr.update(visible=False, choices=[]), gr.update(visible=False), None, "", [])
         empty_infer = (f"Pipeline error: {err}", None, None)
         return empty_train + empty_prep + empty_infer
@@ -541,7 +603,14 @@ if __name__ == "__main__":
                 interactive=True,
             )
             train_language = gr.Dropdown(label="Model language (XTTS/Piper support multilingual)", choices=LANGUAGE_CHOICES, value="en")
-            restore_path = gr.Textbox(label="Optional checkpoint to continue from", value="")
+            with gr.Row():
+                restore_model_dropdown = gr.Dropdown(
+                    label="Resume from previous training run",
+                    choices=[("None", "")] + list_trained_models(args.out_path, "xtts_v2"),
+                    value="",
+                    interactive=True,
+                )
+                restore_path = gr.Textbox(label="Optional checkpoint to continue from", value="")
             use_pretrained = gr.Checkbox(label="Auto-download matching pretrained model when available", value=True)
             num_epochs = gr.Slider(label="Epochs", minimum=1, maximum=1000, step=1, value=args.num_epochs)
             batch_size = gr.Slider(label="Batch size", minimum=1, maximum=128, step=1, value=args.batch_size)
@@ -572,7 +641,10 @@ if __name__ == "__main__":
             checkpoint_path = gr.Textbox(label="Checkpoint path")
             config_path = gr.Textbox(label="Config path")
             trained_reference = gr.Textbox(label="Reference WAV")
-            train_btn = gr.Button(value="Step 2 - Train model", elem_classes=["primary-btn"])
+            with gr.Row():
+                train_btn = gr.Button(value="Step 2 - Train model", elem_classes=["primary-btn"])
+                pause_btn = gr.Button(value="Pause Training", variant="secondary")
+                resume_btn = gr.Button(value="Resume Training", variant="secondary")
             latest_btn = gr.Button(value="Load latest trained model")
 
         with gr.Tab("3 - Inference"):
@@ -649,7 +721,7 @@ if __name__ == "__main__":
                 tts_text,
             ],
             outputs=[
-                # Training outputs (10 items)
+                # Training outputs (11 items)
                 train_status,
                 training_root,
                 artifacts_file,
@@ -660,6 +732,7 @@ if __name__ == "__main__":
                 speaker_reference_audio,
                 infer_model_key,
                 infer_trained_model,
+                restore_model_dropdown,
                 # Preprocessing outputs (12 items)
                 dataset_status,
                 dataset_dir,
@@ -720,6 +793,7 @@ if __name__ == "__main__":
                 speaker_reference_audio,
                 infer_model_key,
                 infer_trained_model,
+                restore_model_dropdown,
             ],
         )
 
@@ -810,6 +884,41 @@ if __name__ == "__main__":
             fn=update_trained_models,
             inputs=[out_path, infer_model_key],
             outputs=[infer_trained_model],
+        )
+
+        def on_restore_dropdown_change(artifacts_path):
+            if not artifacts_path:
+                return ""
+            return resolve_resume_checkpoint(artifacts_path)
+
+        restore_model_dropdown.change(
+            fn=on_restore_dropdown_change,
+            inputs=[restore_model_dropdown],
+            outputs=[restore_path],
+        )
+
+        model_key.change(
+            fn=update_resume_models,
+            inputs=[out_path, model_key],
+            outputs=[restore_model_dropdown],
+        )
+
+        out_path.change(
+            fn=update_resume_models,
+            inputs=[out_path, model_key],
+            outputs=[restore_model_dropdown],
+        )
+
+        pause_btn.click(
+            fn=pause_training,
+            inputs=[],
+            outputs=[train_status],
+        )
+
+        resume_btn.click(
+            fn=resume_training,
+            inputs=[],
+            outputs=[train_status],
         )
 
     demo.launch(share=args.share, debug=False, server_port=args.port)

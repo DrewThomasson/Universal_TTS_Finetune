@@ -392,63 +392,77 @@ def train_piper_model(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        bufsize=1
+        bufsize=1,
+        start_new_session=True
     )
     
+    try:
+        from utils.pipeline import register_active_process
+        register_active_process(process)
+    except Exception:
+        pass
+        
     log_lines = []
     generated_epochs = set()
     import time
     last_check_time = 0.0
     last_dir_mtime = 0.0
 
-    if process.stdout:
-        for line in process.stdout:
-            log_lines.append(line)
-            if stream_logs:
-                sys.stdout.write(line)
-                sys.stdout.flush()
-            if progress_callback:
-                progress_callback(line)
-            
-            # Scan for checkpoints to generate progress audio samples
-            if sample_epoch_interval > 0 and config_path and output_dir:
-                current_time = time.time()
-                if (current_time - last_check_time) > 0.5:
-                    last_check_time = current_time
-                    try:
-                        current_mtime = preprocessed_dir.stat().st_mtime
-                    except Exception:
-                        current_mtime = 0.0
-                    if current_mtime != last_dir_mtime:
-                        last_dir_mtime = current_mtime
-                        _check_and_generate_piper_sample(
-                            preprocessed_dir=preprocessed_dir,
-                            sample_epoch_interval=sample_epoch_interval,
-                            sample_text=sample_text,
-                            config_path=config_path,
-                            output_dir=output_dir,
-                            generated_epochs=generated_epochs,
-                            progress_callback=progress_callback
-                        )
+    try:
+        if process.stdout:
+            for line in process.stdout:
+                log_lines.append(line)
+                if stream_logs:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                if progress_callback:
+                    progress_callback(line)
+                
+                # Scan for checkpoints to generate progress audio samples
+                if sample_epoch_interval > 0 and config_path and output_dir:
+                    current_time = time.time()
+                    if (current_time - last_check_time) > 0.5:
+                        last_check_time = current_time
+                        try:
+                            current_mtime = preprocessed_dir.stat().st_mtime
+                        except Exception:
+                            current_mtime = 0.0
+                        if current_mtime != last_dir_mtime:
+                            last_dir_mtime = current_mtime
+                            _check_and_generate_piper_sample(
+                                preprocessed_dir=preprocessed_dir,
+                                sample_epoch_interval=sample_epoch_interval,
+                                sample_text=sample_text,
+                                config_path=config_path,
+                                output_dir=output_dir,
+                                generated_epochs=generated_epochs,
+                                progress_callback=progress_callback
+                            )
 
-    process.wait()
-    
-    # Run a final check to ensure we capture the final checkpoints
-    if sample_epoch_interval > 0 and config_path and output_dir:
-        _check_and_generate_piper_sample(
-            preprocessed_dir=preprocessed_dir,
-            sample_epoch_interval=sample_epoch_interval,
-            sample_text=sample_text,
-            config_path=config_path,
-            output_dir=output_dir,
-            generated_epochs=generated_epochs,
-            progress_callback=progress_callback
-        )
-    
-    if process.returncode != 0:
-        raise RuntimeError(f"Piper training subprocess failed with code {process.returncode}")
+        process.wait()
         
-    return "".join(log_lines)
+        # Run a final check to ensure we capture the final checkpoints
+        if sample_epoch_interval > 0 and config_path and output_dir:
+            _check_and_generate_piper_sample(
+                preprocessed_dir=preprocessed_dir,
+                sample_epoch_interval=sample_epoch_interval,
+                sample_text=sample_text,
+                config_path=config_path,
+                output_dir=output_dir,
+                generated_epochs=generated_epochs,
+                progress_callback=progress_callback
+            )
+        
+        if process.returncode != 0:
+            raise RuntimeError(f"Piper training subprocess failed with code {process.returncode}")
+            
+        return "".join(log_lines)
+    finally:
+        try:
+            from utils.pipeline import register_active_process
+            register_active_process(None)
+        except Exception:
+            pass
 
 def export_piper_onnx(ckpt_path: Path, onnx_path: Path, config_path: Path):
     """Exports PyTorch Lightning checkpoint to ONNX format and copies its configuration file."""
