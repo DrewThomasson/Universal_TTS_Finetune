@@ -15,6 +15,19 @@ if not hasattr(importlib.machinery.FileFinder, "find_module"):
         return spec.loader if spec is not None else None
     importlib.machinery.FileFinder.find_module = find_module_shim
 
+# Patch PyTorch 2.6+ to default to weights_only=False in torch.load for compatibility with older checkpoints
+try:
+    import torch
+    if hasattr(torch, "load"):
+        original_load = torch.load
+        def patched_load(*args, **kwargs):
+            if "weights_only" not in kwargs:
+                kwargs["weights_only"] = False
+            return original_load(*args, **kwargs)
+        torch.load = patched_load
+except ImportError:
+    pass
+
 import argparse
 import os
 import re
@@ -292,7 +305,19 @@ def _gradio_progress(progress: gr.Progress | None):
     return callback
 
 
-def preprocess_dataset(audio_files, audio_dir, transcript_file, language, whisper_model, out_path, dataset_name, diarize_speakers, progress=gr.Progress()):
+def _clean_audio_path(path_val):
+    if not path_val:
+        return None
+    try:
+        p = Path(path_val)
+        if p.exists() and p.is_file():
+            return str(p.resolve())
+    except Exception:
+        pass
+    return None
+
+
+def preprocess_dataset(audio_files, audio_dir, transcript_file, language, whisper_model, out_path, dataset_name, diarize_speakers, expected_speakers=0, diarize_threshold=0.3, progress=gr.Progress()):
     try:
         tracker = PreprocessProgressTracker(progress)
         result = prepare_dataset(
@@ -304,6 +329,8 @@ def preprocess_dataset(audio_files, audio_dir, transcript_file, language, whispe
             whisper_model_name=whisper_model,
             dataset_name=dataset_name or "LJSpeech-1.1",
             diarize_speakers=diarize_speakers,
+            expected_speakers=int(expected_speakers or 0),
+            diarize_threshold=float(diarize_threshold or 0.3),
             progress=tracker,
         )
         
@@ -344,7 +371,70 @@ def preprocess_dataset(audio_files, audio_dir, transcript_file, language, whispe
             default_ref,
             show_speakers,
             show_container,
+            _clean_audio_path(default_ref),
+            default_info,
+            speakers_list,
+        )
+    except Exception as exc:
+        return (
+            format_exception(exc), "", "", "", "",
+            gr.update(choices=list_datasets(out_path), value=""), "",
+            gr.update(visible=False, choices=[]), gr.update(visible=False),
+            None, "", []
+        )
+
+
+def preprocess_re_diarize(dataset_dir, expected_speakers, diarize_threshold, out_path, progress=gr.Progress()):
+    try:
+        if not dataset_dir:
+            raise ValueError("No dataset directory selected. Please select a valid dataset directory.")
+        tracker = PreprocessProgressTracker(progress)
+        from utils.pipeline import re_diarize_dataset
+        result = re_diarize_dataset(
+            dataset_dir=dataset_dir,
+            expected_speakers=int(expected_speakers or 0),
+            diarize_threshold=float(diarize_threshold or 0.35),
+            progress=tracker,
+        )
+        
+        speakers_list = result.get("all_speakers", [])
+        speaker_choices = []
+        
+        if speakers_list:
+            for s in speakers_list:
+                dir_name = Path(s["dataset_dir"]).name
+                label = f"{dir_name} (Duration: {s['total_audio_seconds']}s, Clips: {s['created_sample_count']})"
+                speaker_choices.append((label, s["dataset_dir"]))
+            
+            message = f"Dataset re-diarized into {len(speakers_list)} speakers. Select speaker below to preview and activate."
+            default_speaker_dir = speakers_list[0]["dataset_dir"]
+            default_ref = speakers_list[0]["reference_wav"]
+            default_info = f"**Dataset path**: `{default_speaker_dir}`\n**Duration**: {speakers_list[0]['total_audio_seconds']} seconds\n**Total clips**: {speakers_list[0]['created_sample_count']}"
+        else:
+            message = f"Dataset ready with {result['created_sample_count']} samples at {result['dataset_dir']}"
+            default_speaker_dir = result["dataset_dir"]
+            default_ref = result["reference_wav"]
+            default_info = f"**Dataset path**: `{default_speaker_dir}`\n**Duration**: {result['total_audio_seconds']} seconds\n**Total clips**: {result['created_sample_count']}"
+            
+        choices = list_datasets(out_path)
+        if default_speaker_dir not in choices:
+            choices.append(default_speaker_dir)
+            choices = sorted(choices)
+
+        show_speakers = gr.update(visible=bool(speakers_list), choices=speaker_choices, value=default_speaker_dir if speakers_list else None)
+        show_container = gr.update(visible=bool(speakers_list))
+        
+        return (
+            message,
+            default_speaker_dir,
+            result["metadata_train"],
+            result["metadata_val"],
             default_ref,
+            gr.update(choices=choices, value=default_speaker_dir),
+            default_ref,
+            show_speakers,
+            show_container,
+            _clean_audio_path(default_ref),
             default_info,
             speakers_list,
         )
@@ -446,7 +536,7 @@ def run_inference(artifacts_path, model_key, language, tts_text, speaker_audio_f
             output_file=default_test_output(out_path),
             progress=_gradio_progress(progress),
         )
-        return "Speech generated.", result["output_file"], result.get("speaker_wav") or None
+        return "Speech generated.", _clean_audio_path(result["output_file"]), _clean_audio_path(result.get("speaker_wav"))
     except Exception as exc:
         return format_exception(exc), None, None
 
@@ -472,7 +562,7 @@ def on_select_speaker(selected_dir, speakers_state):
     info_md = f"**Dataset path**: `{selected_dir}`\n**Duration**: {speaker_info['total_audio_seconds']} seconds\n**Total clips**: {speaker_info['created_sample_count']}"
     ref_wav = speaker_info["reference_wav"]
     
-    return selected_dir, ref_wav, ref_wav, info_md, gr.update(value=selected_dir)
+    return selected_dir, ref_wav, _clean_audio_path(ref_wav), info_md, gr.update(value=selected_dir)
 
 
 def select_trained_model(val):
@@ -486,6 +576,7 @@ def on_training_params_change(model_key, dataset_dir):
 
 def preprocess_and_train(
     audio_files, audio_dir, transcript_file, language, whisper_model, out_path, dataset_name, diarize_speakers,
+    expected_speakers, diarize_threshold,
     model_key, train_language, num_epochs, batch_size, grad_accum, max_audio_length, restore_path, use_pretrained, extra_overrides_json,
     sample_epoch_interval, sample_text,
     tts_text,
@@ -494,7 +585,8 @@ def preprocess_and_train(
     try:
         progress(0, desc="Starting step 1: Preprocessing dataset...")
         preprocess_res = preprocess_dataset(
-            audio_files, audio_dir, transcript_file, language, whisper_model, out_path, dataset_name, diarize_speakers, progress
+            audio_files, audio_dir, transcript_file, language, whisper_model, out_path, dataset_name, diarize_speakers,
+            expected_speakers, diarize_threshold, progress
         )
         status_msg, dataset_dir = preprocess_res[0], preprocess_res[1]
         if not dataset_dir or "failed" in status_msg.lower():
@@ -583,6 +675,9 @@ if __name__ == "__main__":
             language = gr.Dropdown(label="Dataset language", choices=LANGUAGE_CHOICES, value="en")
             whisper_model = gr.Dropdown(label="Whisper model", choices=WHISPER_CHOICES, value="small")
             diarize_speakers = gr.Checkbox(label="Diarize speakers (split multi-speaker audio)", value=False)
+            with gr.Row(visible=False) as diarize_options:
+                expected_speakers = gr.Slider(label="Expected speaker count (0 for auto)", minimum=0, maximum=20, step=1, value=0)
+                diarize_threshold = gr.Slider(label="Diarization threshold (distance, only if auto)", minimum=0.05, maximum=1.0, step=0.05, value=0.35)
             
             # Speaker preview group (initially hidden)
             speakers_state = gr.State([])
@@ -600,6 +695,20 @@ if __name__ == "__main__":
             with gr.Row():
                 prepare_btn = gr.Button(value="Step 1 - Create dataset", elem_classes=["primary-btn"])
                 prepare_and_train_btn = gr.Button(value="Create dataset & Start training", variant="secondary")
+            
+            with gr.Accordion("Re-diarize an Existing Dataset", open=False):
+                gr.Markdown("Select a previously created dataset (mixed or diarized) and re-run speaker diarization using updated settings without re-transcribing.")
+                re_diarize_source = gr.Dropdown(
+                    label="Select dataset to re-diarize",
+                    choices=list_datasets(args.out_path),
+                    value="",
+                    allow_custom_value=True,
+                    interactive=True,
+                )
+                with gr.Row():
+                    re_diarize_expected = gr.Slider(label="Expected speaker count (0 for auto)", minimum=0, maximum=20, step=1, value=0)
+                    re_diarize_thresh = gr.Slider(label="Diarization threshold (distance, only if auto)", minimum=0.05, maximum=1.0, step=0.05, value=0.35)
+                re_diarize_btn = gr.Button(value="Re-diarize Dataset", variant="secondary")
 
         with gr.Tab("2 - Train model"):
             model_key = gr.Dropdown(label="Model", choices=MODEL_CHOICES, value="xtts_v2")
@@ -684,6 +793,8 @@ if __name__ == "__main__":
                 out_path,
                 dataset_name,
                 diarize_speakers,
+                expected_speakers,
+                diarize_threshold,
             ],
             outputs=[
                 dataset_status,
@@ -701,6 +812,36 @@ if __name__ == "__main__":
             ],
         )
 
+        re_diarize_btn.click(
+            fn=preprocess_re_diarize,
+            inputs=[
+                re_diarize_source,
+                re_diarize_expected,
+                re_diarize_thresh,
+                out_path,
+            ],
+            outputs=[
+                dataset_status,
+                dataset_dir,
+                train_csv,
+                val_csv,
+                dataset_reference,
+                train_dataset_dir,
+                speaker_reference_audio,
+                speaker_selector,
+                speakers_container,
+                speaker_preview_audio,
+                speaker_details,
+                speakers_state,
+            ],
+        )
+
+        re_diarize_source.focus(
+            fn=lambda op: gr.update(choices=list_datasets(op)),
+            inputs=[out_path],
+            outputs=[re_diarize_source],
+        )
+
         prepare_and_train_btn.click(
             fn=preprocess_and_train,
             inputs=[
@@ -713,6 +854,8 @@ if __name__ == "__main__":
                 out_path,
                 dataset_name,
                 diarize_speakers,
+                expected_speakers,
+                diarize_threshold,
                 # Training inputs
                 model_key,
                 train_language,
@@ -847,6 +990,15 @@ if __name__ == "__main__":
                 out_path,
             ],
             outputs=[infer_status, generated_audio, used_reference_audio],
+        )
+
+        def toggle_diarize_options(visible):
+            return gr.update(visible=visible)
+
+        diarize_speakers.change(
+            fn=toggle_diarize_options,
+            inputs=[diarize_speakers],
+            outputs=[diarize_options],
         )
 
         model_key.change(

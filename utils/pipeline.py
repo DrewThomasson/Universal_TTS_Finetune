@@ -15,6 +15,19 @@ if not hasattr(importlib.machinery.FileFinder, "find_module"):
         return spec.loader if spec is not None else None
     importlib.machinery.FileFinder.find_module = find_module_shim
 
+# Patch PyTorch 2.6+ to default to weights_only=False in torch.load for compatibility with older checkpoints
+try:
+    import torch
+    if hasattr(torch, "load"):
+        original_load = torch.load
+        def patched_load(*args, **kwargs):
+            if "weights_only" not in kwargs:
+                kwargs["weights_only"] = False
+            return original_load(*args, **kwargs)
+        torch.load = patched_load
+except ImportError:
+    pass
+
 import csv
 import json
 import random
@@ -380,6 +393,8 @@ def prepare_dataset(
     max_segment_seconds: float = DEFAULT_MAX_SEGMENT_SECONDS,
     segment_buffer_seconds: float = DEFAULT_SEGMENT_BUFFER_SECONDS,
     diarize_speakers: bool = False,
+    expected_speakers: int = 0,
+    diarize_threshold: float = 0.3,
     dataset_name: str = "LJSpeech-1.1",
     progress: ProgressCallback = None,
 ) -> dict[str, Any]:
@@ -518,9 +533,12 @@ def prepare_dataset(
             
             embeddings_array = np.array(embeddings)
             dist_matrix = pdist(embeddings_array, metric='cosine')
-            Z = linkage(dist_matrix, method='complete')
-            # 0.3 cosine distance is a reasonable threshold for distinct speakers
-            labels = fcluster(Z, t=0.3, criterion='distance')
+            # Use 'average' linkage which is more robust to outliers than 'complete' linkage
+            Z = linkage(dist_matrix, method='average')
+            if expected_speakers > 0:
+                labels = fcluster(Z, expected_speakers, criterion='maxclust')
+            else:
+                labels = fcluster(Z, t=diarize_threshold, criterion='distance')
             
             from collections import defaultdict
             clusters = defaultdict(list)
@@ -569,8 +587,8 @@ def prepare_dataset(
                 if idx == 1:
                     primary_dataset_info = speaker_info
             
-            # Clean up the original mixed dataset to save space
-            shutil.rmtree(dataset_dir)
+            # We preserve the original mixed dataset so that it can be re-diarized later
+            # shutil.rmtree(dataset_dir)
             
             primary_dataset_info["all_speakers"] = all_speakers
             _notify(progress, f"Diarization complete! Found {len(all_speakers)} speaker(s). Returning Speaker 1 dataset ({primary_dataset_info['total_audio_seconds']} seconds).")
@@ -600,6 +618,144 @@ def prepare_dataset(
     dataset_info["dataset_info"] = str(info_path)
     _notify(progress, f"Dataset creation complete! Created {dataset_info['created_sample_count']} samples.")
     return dataset_info
+
+
+def re_diarize_dataset(
+    *,
+    dataset_dir: str,
+    expected_speakers: int = 0,
+    diarize_threshold: float = 0.35,
+    eval_percentage: float = DEFAULT_EVAL_PERCENTAGE,
+    shuffle_seed: int = DEFAULT_SHUFFLE_SEED,
+    progress: ProgressCallback = None,
+) -> dict[str, Any]:
+    dataset_path = Path(dataset_dir).expanduser().resolve()
+    if not dataset_path.exists() or not dataset_path.is_dir():
+        raise ValueError(f"Dataset directory not found: {dataset_path}")
+        
+    wavs_dir = dataset_path / "wavs"
+    if not wavs_dir.exists() or not wavs_dir.is_dir():
+        raise ValueError(f"Wavs directory not found inside dataset: {wavs_dir}")
+        
+    metadata_path = dataset_path / "metadata.csv"
+    if not metadata_path.exists():
+        raise ValueError(f"metadata.csv not found in dataset: {metadata_path}")
+        
+    # Read language from lang.txt if available
+    language = "en"
+    lang_file = dataset_path / "lang.txt"
+    if lang_file.exists():
+        language = lang_file.read_text(encoding="utf-8").strip()
+        
+    # Parse metadata.csv
+    entries = []
+    with metadata_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("|")
+            if len(parts) >= 2:
+                sample_id = parts[0]
+                text = parts[1]
+                original_text = parts[2] if len(parts) > 2 else text
+                audio_path = wavs_dir / f"{sample_id}.wav"
+                if audio_path.exists():
+                    import soundfile as sf
+                    info = sf.info(str(audio_path))
+                    duration_seconds = info.duration
+                    entries.append({
+                        "id": sample_id,
+                        "text": text,
+                        "original_text": original_text,
+                        "audio_path": str(audio_path),
+                        "duration_seconds": duration_seconds,
+                    })
+                    
+    if not entries:
+        raise ValueError("No valid audio clips found in metadata.csv")
+        
+    _notify(progress, f"Loaded {len(entries)} clips from metadata.csv. Starting diarization clustering...")
+    
+    # Load XTTS
+    model_path, _, _ = ModelManager(progress_bar=True).download_model("tts_models/multilingual/multi-dataset/xtts_v2")
+    config = XttsConfig()
+    config.load_json(os.path.join(model_path, "config.json"))
+    model = Xtts.init_from_config(config)
+    model.load_checkpoint(config, checkpoint_dir=model_path, eval=True)
+    if torch.cuda.is_available():
+        model.cuda()
+        
+    embeddings = []
+    for i, entry in enumerate(entries):
+        if i % 10 == 0:
+            _notify(progress, f"Extracting voice blueprints: {i}/{len(entries)}")
+        _, speaker_embedding = model.get_conditioning_latents(audio_path=entry["audio_path"])
+        embeddings.append(speaker_embedding.squeeze().cpu().detach().numpy())
+        
+    embeddings_array = np.array(embeddings)
+    dist_matrix = pdist(embeddings_array, metric='cosine')
+    Z = linkage(dist_matrix, method='average')
+    if expected_speakers > 0:
+        labels = fcluster(Z, expected_speakers, criterion='maxclust')
+    else:
+        labels = fcluster(Z, t=diarize_threshold, criterion='distance')
+        
+    from collections import defaultdict
+    clusters = defaultdict(list)
+    for label, entry in zip(labels, entries):
+        clusters[label].append(entry)
+        
+    sorted_clusters = sorted(clusters.values(), key=lambda c: sum(e["duration_seconds"] for e in c), reverse=True)
+    _notify(progress, f"Found {len(sorted_clusters)} distinct speakers.")
+    
+    # Determine base name of dataset by stripping _Speaker_X
+    base_name = dataset_path.name
+    base_name = re.sub(r"_Speaker_\d+$", "", base_name)
+    
+    # Create sub-datasets
+    primary_dataset_info = None
+    all_speakers = []
+    for idx, cluster_entries in enumerate(sorted_clusters, start=1):
+        speaker_dataset_dir = dataset_path.parent / f"{base_name}_Speaker_{idx}"
+        speaker_wavs_dir = speaker_dataset_dir / "wavs"
+        if speaker_dataset_dir.exists():
+            shutil.rmtree(speaker_dataset_dir)
+        speaker_wavs_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Copy wavs
+        for entry in cluster_entries:
+            new_wav_path = speaker_wavs_dir / Path(entry["audio_path"]).name
+            shutil.copy2(entry["audio_path"], new_wav_path)
+            entry["audio_path"] = str(new_wav_path)
+            
+        speaker_metadata = _write_metadata_files(cluster_entries, speaker_dataset_dir, eval_percentage, shuffle_seed)
+        (speaker_dataset_dir / "lang.txt").write_text(f"{language}\n", encoding="utf-8")
+        
+        speaker_longest = max(cluster_entries, key=lambda e: e["duration_seconds"])
+        speaker_info = {
+            "dataset_dir": str(speaker_dataset_dir),
+            "wavs_dir": str(speaker_wavs_dir),
+            "language": language,
+            "sample_rate": DEFAULT_SAMPLE_RATE,
+            "input_audio_count": 1,
+            "created_sample_count": len(cluster_entries),
+            "total_audio_seconds": round(sum(e["duration_seconds"] for e in cluster_entries), 2),
+            "reference_wav": speaker_longest["audio_path"],
+            **speaker_metadata,
+        }
+        info_path = speaker_dataset_dir / "dataset_info.json"
+        info_path.write_text(json.dumps(_json_ready(speaker_info), indent=2), encoding="utf-8")
+        speaker_info["dataset_info"] = str(info_path)
+        
+        all_speakers.append(speaker_info)
+        if idx == 1:
+            primary_dataset_info = speaker_info
+            
+    primary_dataset_info["all_speakers"] = all_speakers
+    _notify(progress, f"Re-diarization complete! Found {len(all_speakers)} speaker(s). Returning Speaker 1 dataset ({primary_dataset_info['total_audio_seconds']} seconds).")
+    return primary_dataset_info
+
 
 
 def _replace_literal(source: str, old: str, new: str) -> str:
