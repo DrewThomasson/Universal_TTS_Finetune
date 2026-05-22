@@ -415,6 +415,7 @@ def on_training_params_change(model_key, dataset_dir):
 def preprocess_and_train(
     audio_files, audio_dir, transcript_file, language, whisper_model, out_path, dataset_name, diarize_speakers,
     model_key, train_language, num_epochs, batch_size, grad_accum, max_audio_length, restore_path, use_pretrained, extra_overrides_json,
+    tts_text,
     progress=gr.Progress()
 ):
     try:
@@ -426,19 +427,34 @@ def preprocess_and_train(
         if not dataset_dir or "failed" in status_msg.lower():
             train_status_msg = f"Training skipped because dataset preparation failed: {status_msg}"
             empty_train = (train_status_msg, "", "", "", "", "", "", "", model_key, gr.update())
-            return empty_train + preprocess_res
+            empty_infer = (f"Inference skipped: Preprocessing failed.", None, None)
+            return empty_train + preprocess_res + empty_infer
             
-        progress(0.5, desc="Preprocessing complete! Starting step 2: Training model...")
+        progress(0.4, desc="Preprocessing complete! Starting step 2: Training model...")
         
         train_res = run_training(
             model_key, dataset_dir, train_language, num_epochs, batch_size, grad_accum, out_path, max_audio_length, restore_path, use_pretrained, extra_overrides_json, progress
         )
-        return train_res + preprocess_res
+        artifacts_file_val = train_res[2]
+        speaker_ref_val = train_res[7]
+        
+        if not artifacts_file_val or "failed" in train_res[0].lower():
+            train_status_msg = f"Inference skipped because training failed: {train_res[0]}"
+            empty_infer = (train_status_msg, None, None)
+            return train_res + preprocess_res + empty_infer
+            
+        progress(0.9, desc="Training complete! Starting step 3: Generating test speech...")
+        
+        infer_res = run_inference(
+            artifacts_file_val, model_key, train_language, tts_text, speaker_ref_val, out_path, progress
+        )
+        return train_res + preprocess_res + infer_res
     except Exception as exc:
         err = format_exception(exc)
         empty_train = (f"Pipeline error: {err}", "", "", "", "", "", "", "", model_key, gr.update())
         empty_prep = (err, "", "", "", "", gr.update(choices=list_datasets(out_path), value=""), "", gr.update(visible=False, choices=[]), gr.update(visible=False), None, "", [])
-        return empty_train + empty_prep
+        empty_infer = (f"Pipeline error: {err}", None, None)
+        return empty_train + empty_prep + empty_infer
 
 
 if __name__ == "__main__":
@@ -608,6 +624,8 @@ if __name__ == "__main__":
                 restore_path,
                 use_pretrained,
                 extra_overrides_json,
+                # Inference input
+                tts_text,
             ],
             outputs=[
                 # Training outputs (10 items)
@@ -634,6 +652,10 @@ if __name__ == "__main__":
                 speaker_preview_audio,
                 speaker_details,
                 speakers_state,
+                # Inference outputs (3 items)
+                infer_status,
+                generated_audio,
+                used_reference_audio,
             ],
         )
 
