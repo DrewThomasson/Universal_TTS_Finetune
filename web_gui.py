@@ -288,7 +288,7 @@ def preprocess_dataset(audio_files, audio_dir, transcript_file, language, whispe
         )
 
 
-def run_training(model_key, dataset_dir, language, num_epochs, batch_size, grad_accum, out_path, max_audio_length, restore_path, use_pretrained, extra_overrides_json, progress=gr.Progress()):
+def run_training(model_key, dataset_dir, language, num_epochs, batch_size, grad_accum, out_path, max_audio_length, restore_path, use_pretrained, extra_overrides_json, sample_epoch_interval=0, sample_text="", progress=gr.Progress()):
     try:
         tracker = TrainingProgressTracker(progress, int(num_epochs))
         result = train_model(
@@ -304,6 +304,8 @@ def run_training(model_key, dataset_dir, language, num_epochs, batch_size, grad_
             use_pretrained=use_pretrained,
             extra_overrides_json=extra_overrides_json or None,
             progress=tracker,
+            sample_epoch_interval=int(sample_epoch_interval),
+            sample_text=sample_text,
         )
         message = f"Training finished. Ready artifacts saved in {Path(result['training_root']) / 'ready'}"
         
@@ -415,6 +417,7 @@ def on_training_params_change(model_key, dataset_dir):
 def preprocess_and_train(
     audio_files, audio_dir, transcript_file, language, whisper_model, out_path, dataset_name, diarize_speakers,
     model_key, train_language, num_epochs, batch_size, grad_accum, max_audio_length, restore_path, use_pretrained, extra_overrides_json,
+    sample_epoch_interval, sample_text,
     tts_text,
     progress=gr.Progress()
 ):
@@ -433,7 +436,9 @@ def preprocess_and_train(
         progress(0.4, desc="Preprocessing complete! Starting step 2: Training model...")
         
         train_res = run_training(
-            model_key, dataset_dir, train_language, num_epochs, batch_size, grad_accum, out_path, max_audio_length, restore_path, use_pretrained, extra_overrides_json, progress
+            model_key, dataset_dir, train_language, num_epochs, batch_size, grad_accum, out_path, max_audio_length, restore_path, use_pretrained, extra_overrides_json,
+            sample_epoch_interval, sample_text,
+            progress
         )
         artifacts_file_val = train_res[2]
         speaker_ref_val = train_res[7]
@@ -547,6 +552,20 @@ if __name__ == "__main__":
                 language="json",
                 value="{}",
             )
+            with gr.Accordion("Periodic Progress Audio Sampling (Piper Only)", open=False):
+                sample_epoch_interval = gr.Slider(
+                    label="Sample Interval (Epochs)",
+                    minimum=0,
+                    maximum=500,
+                    step=10,
+                    value=0,
+                    info="Generate and save an audio sample every N epochs. Set to 0 to disable."
+                )
+                sample_text = gr.Textbox(
+                    label="Sample Test Phrase",
+                    value="This is a periodic audio sample to test training progress.",
+                    info="Text sentence to synthesize at each interval."
+                )
             train_status = gr.Textbox(label="Status", interactive=False)
             training_root = gr.Textbox(label="Training root")
             artifacts_file = gr.Textbox(label="Artifacts file")
@@ -624,6 +643,8 @@ if __name__ == "__main__":
                 restore_path,
                 use_pretrained,
                 extra_overrides_json,
+                sample_epoch_interval,
+                sample_text,
                 # Inference input
                 tts_text,
             ],
@@ -685,6 +706,8 @@ if __name__ == "__main__":
                 restore_path,
                 use_pretrained,
                 extra_overrides_json,
+                sample_epoch_interval,
+                sample_text,
             ],
             outputs=[
                 train_status,
