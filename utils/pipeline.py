@@ -379,6 +379,34 @@ def _write_metadata_files(
     }
 
 
+def _extract_speaker_embeddings_pyannote(entries: list[dict[str, Any]], progress: ProgressCallback = None) -> np.ndarray:
+    """Extracts speaker embeddings using pyannote's wespeaker-voxceleb-resnet34-LM model."""
+    from pyannote.audio import Model, Inference
+    import torch
+    import numpy as np
+
+    _notify(progress, "Loading pyannote/wespeaker-voxceleb-resnet34-LM speaker model...")
+    model = Model.from_pretrained('pyannote/wespeaker-voxceleb-resnet34-LM')
+    if torch.cuda.is_available():
+        model = model.cuda()
+    elif torch.backends.mps.is_available():
+        try:
+            model = model.to("mps")
+        except Exception:
+            pass
+
+    inference = Inference(model, window="whole")
+    
+    embeddings = []
+    for i, entry in enumerate(entries):
+        if i % 10 == 0:
+            _notify(progress, f"Extracting voice blueprints: {i}/{len(entries)}")
+        emb = inference(entry["audio_path"])
+        embeddings.append(emb)
+        
+    return np.array(embeddings)
+
+
 def prepare_dataset(
     *,
     output_root: str,
@@ -515,23 +543,7 @@ def prepare_dataset(
     if diarize_speakers and len(entries) > 1:
         _notify(progress, "Starting speaker diarization clustering...")
         try:
-            model_path, _, _ = ModelManager(progress_bar=True).download_model("tts_models/multilingual/multi-dataset/xtts_v2")
-            config = XttsConfig()
-            config.load_json(os.path.join(model_path, "config.json"))
-            model = Xtts.init_from_config(config)
-            model.load_checkpoint(config, checkpoint_dir=model_path, eval=True)
-            if torch.cuda.is_available():
-                model.cuda()
-            
-            embeddings = []
-            for i, entry in enumerate(entries):
-                if i % 10 == 0:
-                    _notify(progress, f"Extracting voice blueprints: {i}/{len(entries)}")
-                # Extract 1x4096 or 1x512 embedding
-                _, speaker_embedding = model.get_conditioning_latents(audio_path=entry["audio_path"])
-                embeddings.append(speaker_embedding.squeeze().cpu().detach().numpy())
-            
-            embeddings_array = np.array(embeddings)
+            embeddings_array = _extract_speaker_embeddings_pyannote(entries, progress)
             dist_matrix = pdist(embeddings_array, metric='cosine')
             # Use 'average' linkage which is more robust to outliers than 'complete' linkage
             Z = linkage(dist_matrix, method='average')
@@ -677,23 +689,7 @@ def re_diarize_dataset(
         
     _notify(progress, f"Loaded {len(entries)} clips from metadata.csv. Starting diarization clustering...")
     
-    # Load XTTS
-    model_path, _, _ = ModelManager(progress_bar=True).download_model("tts_models/multilingual/multi-dataset/xtts_v2")
-    config = XttsConfig()
-    config.load_json(os.path.join(model_path, "config.json"))
-    model = Xtts.init_from_config(config)
-    model.load_checkpoint(config, checkpoint_dir=model_path, eval=True)
-    if torch.cuda.is_available():
-        model.cuda()
-        
-    embeddings = []
-    for i, entry in enumerate(entries):
-        if i % 10 == 0:
-            _notify(progress, f"Extracting voice blueprints: {i}/{len(entries)}")
-        _, speaker_embedding = model.get_conditioning_latents(audio_path=entry["audio_path"])
-        embeddings.append(speaker_embedding.squeeze().cpu().detach().numpy())
-        
-    embeddings_array = np.array(embeddings)
+    embeddings_array = _extract_speaker_embeddings_pyannote(entries, progress)
     dist_matrix = pdist(embeddings_array, metric='cosine')
     Z = linkage(dist_matrix, method='average')
     if expected_speakers > 0:
