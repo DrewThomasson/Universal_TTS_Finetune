@@ -35,7 +35,28 @@ LANGUAGE_CHOICES = [
     "ja",
 ]
 WHISPER_CHOICES = ["large-v3", "large-v2", "large", "medium", "small", "base"]
-MODEL_CHOICES = dropdown_choices()
+MODEL_CHOICES = [(label, key) for key, label in dropdown_choices()]
+
+
+def list_datasets(output_root: str | None) -> list[str]:
+    if not output_root:
+        return []
+    try:
+        base = Path(output_root) / "dataset"
+        if not base.exists():
+            return []
+        paths = []
+        for p in base.iterdir():
+            if p.is_dir() and ((p / "metadata.csv").exists() or (p / "metadata_train.csv").exists()):
+                paths.append(str(p.resolve()))
+        return sorted(paths)
+    except Exception:
+        return []
+
+
+def update_dataset_choices(out_root: str | None) -> gr.Dropdown:
+    choices = list_datasets(out_root)
+    return gr.update(choices=choices)
 
 
 def _path_value(value):
@@ -66,17 +87,23 @@ def preprocess_dataset(audio_files, audio_dir, transcript_file, language, whispe
         message = (
             f"Dataset ready with {result['created_sample_count']} samples at {result['dataset_dir']}"
         )
+        choices = list_datasets(out_path)
+        new_dir = result["dataset_dir"]
+        if new_dir not in choices:
+            choices.append(new_dir)
+            choices = sorted(choices)
+
         return (
             message,
-            result["dataset_dir"],
+            new_dir,
             result["metadata_train"],
             result["metadata_val"],
             result["reference_wav"],
-            result["dataset_dir"],
+            gr.update(choices=choices, value=new_dir),
             result["reference_wav"],
         )
     except Exception as exc:
-        return format_exception(exc), "", "", "", "", "", ""
+        return format_exception(exc), "", "", "", "", gr.update(choices=list_datasets(out_path), value=""), ""
 
 
 
@@ -160,9 +187,19 @@ def run_inference(artifacts_path, model_key, language, tts_text, speaker_audio_f
             output_file=default_test_output(out_path),
             progress=_gradio_progress(progress),
         )
-        return "Speech generated.", result["output_file"], result.get("speaker_wav", "")
+        return "Speech generated.", result["output_file"], result.get("speaker_wav") or None
     except Exception as exc:
         return format_exception(exc), None, None
+
+
+def on_model_change(selected_model):
+    try:
+        from utils.model_registry import get_model_spec
+        spec = get_model_spec(selected_model)
+        req = spec.requires_speaker_wav
+    except Exception:
+        req = False
+    return gr.update(visible=req), gr.update(visible=req)
 
 
 if __name__ == "__main__":
@@ -176,7 +213,29 @@ if __name__ == "__main__":
     parser.add_argument("--max_audio_length", type=int, default=11)
     args = parser.parse_args()
 
-    with gr.Blocks(title="Universal TTS Finetune") as demo:
+    theme = gr.themes.Soft(
+        primary_hue="violet",
+        secondary_hue="indigo",
+        neutral_hue="slate",
+    )
+
+    css_str = """
+    .primary-btn {
+        background: linear-gradient(90deg, #8b5cf6 0%, #6366f1 100%) !important;
+        color: white !important;
+        border: none !important;
+        transition: transform 0.15s ease, box-shadow 0.15s ease !important;
+    }
+    .primary-btn:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(139, 92, 246, 0.4) !important;
+    }
+    .primary-btn:active {
+        transform: translateY(0);
+    }
+    """
+
+    with gr.Blocks(title="Universal TTS Finetune", theme=theme, css=css_str) as demo:
         gr.Markdown(
             "# Universal TTS Finetune\n"
             "Prepare an LJSpeech-style dataset, fine-tune a supported Coqui recipe, and test the trained model."
@@ -197,12 +256,18 @@ if __name__ == "__main__":
             train_csv = gr.Textbox(label="Train metadata")
             val_csv = gr.Textbox(label="Validation metadata")
             dataset_reference = gr.Textbox(label="Reference WAV")
-            prepare_btn = gr.Button(value="Step 1 - Create dataset")
+            prepare_btn = gr.Button(value="Step 1 - Create dataset", elem_classes=["primary-btn"])
 
         with gr.Tab("2 - Train model"):
             model_key = gr.Dropdown(label="Model", choices=MODEL_CHOICES, value="xtts_v2")
-            train_dataset_dir = gr.Textbox(label="Dataset directory", value="")
-            train_language = gr.Dropdown(label="Model language (XTTS only for non-English)", choices=LANGUAGE_CHOICES, value="en")
+            train_dataset_dir = gr.Dropdown(
+                label="Dataset directory",
+                choices=list_datasets(args.out_path),
+                value="",
+                allow_custom_value=True,
+                interactive=True,
+            )
+            train_language = gr.Dropdown(label="Model language (XTTS/Piper support multilingual)", choices=LANGUAGE_CHOICES, value="en")
             restore_path = gr.Textbox(label="Optional checkpoint to continue from", value="")
             use_pretrained = gr.Checkbox(label="Auto-download matching pretrained model when available", value=True)
             num_epochs = gr.Slider(label="Epochs", minimum=1, maximum=1000, step=1, value=args.num_epochs)
@@ -220,7 +285,7 @@ if __name__ == "__main__":
             checkpoint_path = gr.Textbox(label="Checkpoint path")
             config_path = gr.Textbox(label="Config path")
             trained_reference = gr.Textbox(label="Reference WAV")
-            train_btn = gr.Button(value="Step 2 - Train model")
+            train_btn = gr.Button(value="Step 2 - Train model", elem_classes=["primary-btn"])
             latest_btn = gr.Button(value="Load latest trained model")
 
         with gr.Tab("3 - Inference"):
@@ -233,7 +298,7 @@ if __name__ == "__main__":
             generated_audio = gr.Audio(label="Generated audio")
             used_reference_audio = gr.Audio(label="Reference audio used")
             inspect_btn = gr.Button(value="Inspect artifacts")
-            tts_btn = gr.Button(value="Step 3 - Generate speech")
+            tts_btn = gr.Button(value="Step 3 - Generate speech", elem_classes=["primary-btn"])
 
         prepare_btn.click(
             fn=preprocess_dataset,
@@ -263,6 +328,24 @@ if __name__ == "__main__":
             fn=run_inference,
             inputs=[infer_artifacts, infer_model_key, infer_language, tts_text, speaker_reference_audio, out_path],
             outputs=[infer_status, generated_audio, used_reference_audio],
+        )
+
+        model_key.change(
+            fn=on_model_change,
+            inputs=[model_key],
+            outputs=[speaker_reference_audio, used_reference_audio],
+        )
+
+        infer_model_key.change(
+            fn=on_model_change,
+            inputs=[infer_model_key],
+            outputs=[speaker_reference_audio, used_reference_audio],
+        )
+
+        out_path.change(
+            fn=update_dataset_choices,
+            inputs=[out_path],
+            outputs=[train_dataset_dir],
         )
 
     demo.launch(share=args.share, debug=False, server_port=args.port)

@@ -820,6 +820,129 @@ def train_model(
     training_root = output_root_path / "training_runs" / model_key / timestamp
     training_root.mkdir(parents=True, exist_ok=True)
 
+    if model_key == "piper":
+        from utils.piper_utils import (
+            ensure_monotonic_align_compiled,
+            resolve_piper_checkpoint,
+            download_piper_checkpoint,
+            preprocess_piper_dataset,
+            train_piper_model,
+            export_piper_onnx
+        )
+        ensure_monotonic_align_compiled()
+        
+        # Resolve and download pretrained checkpoint if applicable
+        if restore_path:
+            base_ckpt_path = Path(restore_path)
+            config_path = base_ckpt_path.parent / "config.json"
+            if not config_path.exists():
+                json_files = list(base_ckpt_path.parent.glob("*.json"))
+                if json_files:
+                    config_path = json_files[0]
+                else:
+                    _notify(progress, "Checkpoint config not found locally. Resolving a base config...")
+                    checkpoint_info = resolve_piper_checkpoint(language)
+                    _, config_path = download_piper_checkpoint(checkpoint_info, progress)
+        else:
+            _notify(progress, f"Resolving Piper checkpoint for language: {language}...")
+            checkpoint_info = resolve_piper_checkpoint(language)
+            _notify(progress, f"Downloading checkpoint: {checkpoint_info['voice']} ({checkpoint_info['quality']})")
+            base_ckpt_path, config_path = download_piper_checkpoint(checkpoint_info, progress)
+            
+        with open(config_path, "r", encoding="utf-8") as f:
+            ckpt_config = json.load(f)
+        sample_rate = ckpt_config.get("audio", {}).get("sample_rate", 22050)
+        quality = checkpoint_info.get("quality", "medium") if "checkpoint_info" in locals() else ckpt_config.get("audio", {}).get("quality", "medium")
+        
+        espeak_language = None
+        if "checkpoint_info" in locals():
+            espeak_language = checkpoint_info["locale"].lower().replace("_", "-")
+        if not espeak_language:
+            espeak_language = ckpt_config.get("espeak", {}).get("voice") or ckpt_config.get("language", {}).get("code")
+        if not espeak_language:
+            espeak_language = language.lower().replace("_", "-")
+            
+        preprocessed_dir = training_root / "preprocessed"
+        
+        run_summary = {
+            "model_key": spec.key,
+            "model_label": spec.label,
+            "training_root": str(training_root),
+            "preprocessed_dir": str(preprocessed_dir),
+            "dataset_dir": str(dataset_root),
+            "base_checkpoint": str(base_ckpt_path),
+            "base_config": str(config_path),
+            "espeak_language": espeak_language,
+            "sample_rate": sample_rate,
+            "quality": quality,
+        }
+        if dry_run:
+            run_summary["status"] = "dry-run"
+            return run_summary
+            
+        # 1. Preprocess dataset
+        _notify(progress, "Preprocessing dataset for Piper...")
+        preprocess_piper_dataset(dataset_root, preprocessed_dir, espeak_language, sample_rate)
+        
+        # 2. Overwrite configuration with base checkpoint's config
+        shutil.copy2(config_path, preprocessed_dir / "config.json")
+        
+        # 3. Train the model
+        _notify(progress, f"Training Piper model for {epochs} epochs...")
+        log_path = training_root / "training.log"
+        try:
+            log_output = train_piper_model(
+                preprocessed_dir=preprocessed_dir,
+                base_ckpt_path=base_ckpt_path,
+                epochs=epochs,
+                batch_size=batch_size,
+                quality=quality,
+                stream_logs=stream_logs,
+                progress_callback=progress
+            )
+            log_path.write_text(log_output, encoding="utf-8")
+        except Exception as e:
+            if log_path.exists():
+                log_output = log_path.read_text(encoding="utf-8")
+            else:
+                log_output = str(e)
+            raise RuntimeError(
+                f"Piper training failed. See {log_path}\n\n"
+                f"LOGS:\n{_tail_text(log_output, ERROR_LOG_TAIL_CHARS)}"
+            ) from e
+            
+        # 4. Find trained checkpoint and export to ONNX
+        lightning_logs_dir = preprocessed_dir / "lightning_logs"
+        trained_ckpt = _latest_matching_file(lightning_logs_dir, ["**/*.ckpt", "*.ckpt"])
+        if not trained_ckpt:
+            trained_ckpt = _latest_matching_file(training_root, ["**/*.ckpt", "*.ckpt"])
+        if not trained_ckpt:
+            raise FileNotFoundError("No training checkpoint .ckpt file was produced by Piper training.")
+            
+        _notify(progress, "Exporting trained model to ONNX...")
+        ready_dir = training_root / "ready"
+        ready_dir.mkdir(parents=True, exist_ok=True)
+        ready_onnx = ready_dir / "model.onnx"
+        
+        export_piper_onnx(trained_ckpt, ready_onnx, config_path)
+        
+        artifacts = {
+            "model_key": spec.key,
+            "model_label": spec.label,
+            "family": spec.family,
+            "training_root": str(training_root),
+            "dataset_dir": str(dataset_root),
+            "checkpoint": str(ready_onnx),
+            "config": str(ready_onnx) + ".json",
+            "reference_wav": "",
+            "log_path": str(log_path),
+            "unused_overrides": {},
+        }
+        artifacts_path = ready_dir / "artifacts.json"
+        artifacts_path.write_text(json.dumps(_json_ready(artifacts), indent=2), encoding="utf-8")
+        artifacts["artifacts_file"] = str(artifacts_path)
+        return artifacts
+
     computed_restore_path = _download_restore_path(model_key, use_pretrained, restore_path, progress)
     extra_overrides = json.loads(extra_overrides_json) if extra_overrides_json else {}
     if extra_overrides_json and not isinstance(extra_overrides, dict):
@@ -1029,6 +1152,15 @@ def synthesize(
         )
         waveform = torch.tensor(output["wav"]).unsqueeze(0)
         _save_waveform(output_path, waveform, 24000)
+    elif artifacts["family"] == "piper":
+        _notify(progress, "Loading Piper model and generating speech...")
+        from utils.piper_utils import synthesize_piper
+        synthesize_piper(
+            onnx_path=artifacts["checkpoint"],
+            config_path=artifacts["config"],
+            text=text,
+            output_wav_path=str(output_path)
+        )
     else:
         _notify(progress, "Loading TTS model...")
         runtime = _load_tts_runtime(artifacts, progress)

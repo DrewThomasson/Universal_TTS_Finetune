@@ -5,3 +5,14 @@ coqui-tts[languages] == 0.24.2
 
 cutlet
 fugashi[unidic-lite]
+
+# Piper training and inference dependencies
+Cython>=0.29.0
+piper-phonemize-fix
+librosa>=0.9.2,<1
+pytorch-lightning>=1.7.0
+onnx>=1.11.0
+onnxruntime>=1.11.0
+onnx-simplifier>=0.4.10
+onnxscript>=0.7.0
+

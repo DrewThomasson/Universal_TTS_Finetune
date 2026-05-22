@@ -1,6 +1,6 @@
 # Universal_TTS_Finetune
 
-Universal Coqui TTS fine-tuning workflow with:
+Universal Coqui & Rhasspy Piper TTS fine-tuning workflow with:
 - a Gradio web GUI
 - a headless CLI
 - LJSpeech-style dataset generation from your own audio
@@ -26,6 +26,7 @@ The current workflow targets the bundled `recipes/ljspeech` training recipes for
 - VITS
 - XTTS v1
 - XTTS v2
+- Piper TTS (Rhasspy)
 
 When Coqui publishes a matching pretrained checkpoint, the trainer can auto-download it and continue from it. Otherwise the workflow still prepares the recipe workspace and can train from a user-supplied checkpoint or recipe defaults.
 
@@ -83,7 +84,7 @@ pip install -r requirements.txt
 Run the application directly with Python:
 
 ```bash
-python xtts_demo.py --port 5003 --out_path /absolute/path/to/output
+python web_gui.py --port 5003 --out_path /absolute/path/to/output
 ```
 
 ## Run with Docker
