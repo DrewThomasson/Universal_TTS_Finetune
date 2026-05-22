@@ -38,6 +38,10 @@ Point the app at audio files or a folder of audio.
 
 - If you provide a transcript map (`csv`, `tsv`, `txt`, or `json`), it uses that text.
 - If you do not provide text, it transcribes with Whisper and chunks longer recordings into sentence-sized clips.
+- **Speaker Diarization**: Optionally enable speaker diarization to separate multiple speakers into distinct datasets. This uses a high-performance **PyAnnote ResNet-34 VoxCeleb** speaker model (`pyannote/wespeaker-voxceleb-resnet34-LM`) to extract embeddings and group clips by voice. You can configure:
+  - **Expected Speakers**: Force the clustering into exactly N speaker folders.
+  - **Distance Threshold**: Fine-tune the sensitivity of auto-detecting speakers when expected speakers is set to 0.
+- **Re-diarization**: Once a dataset has been prepared, the original mixed audio clips are preserved. You can re-diarize the dataset with new speaker counts or thresholds via the web GUI without re-running the slow Whisper transcription step.
 - It writes an LJSpeech-style dataset under:
 
 ```text
@@ -118,7 +122,7 @@ python headless_cli.py prepare-dataset \
   --diarize-speakers
 ```
 
-*Note: The `--diarize-speakers` flag is optional. If provided, the pipeline will extract voice blueprints for all generated audio clips and cluster them by distinct speakers. It will output separate datasets (e.g., `dataset/LJSpeech-1.1_Speaker_1/`) and default to returning the speaker with the most training data.*
+*Note: The `--diarize-speakers` flag is optional. If provided, the pipeline will extract speaker embeddings using a pre-trained **PyAnnote ResNet-34** speaker model and cluster them by distinct speakers. You can optionally specify `--expected-speakers <count>` to cluster into exactly that many speakers, or adjust `--diarize-threshold <float>` to control auto-detection sensitivity. It will output separate datasets (e.g., `dataset/LJSpeech-1.1_Speaker_1/`) and default to returning the speaker with the most training data.*
 
 Prepare a dataset using an existing transcript file:
 
