@@ -80,6 +80,8 @@ def _build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--max-segment-seconds", type=float, default=12.0)
     prepare.add_argument("--segment-buffer-seconds", type=float, default=0.2)
     prepare.add_argument("--diarize-speakers", action="store_true", help="Automatically cluster audio into separate speaker datasets")
+    prepare.add_argument("--expected-speakers", type=int, default=0, help="Expected number of speaker clusters (0 to auto-detect based on threshold)")
+    prepare.add_argument("--diarize-threshold", type=float, default=0.3, help="Distance threshold for speaker clustering auto-detection (used if expected-speakers is 0)")
 
     train = subparsers.add_parser("train", help="Train or fine-tune a selected Coqui recipe.")
     train.add_argument("--model", required=True, choices=[key for key, _ in dropdown_choices()])
@@ -126,6 +128,8 @@ def _build_parser() -> argparse.ArgumentParser:
     workflow.add_argument("--output-file")
     workflow.add_argument("--no-stream-logs", action="store_true", help="Disable streaming of training logs to the console")
     workflow.add_argument("--diarize-speakers", action="store_true", help="Automatically cluster audio into separate speaker datasets")
+    workflow.add_argument("--expected-speakers", type=int, default=0, help="Expected number of speaker clusters (0 to auto-detect based on threshold)")
+    workflow.add_argument("--diarize-threshold", type=float, default=0.3, help="Distance threshold for speaker clustering auto-detection (used if expected-speakers is 0)")
     workflow.add_argument("--sample-epoch-interval", type=int, default=0, help="Generate and save an audio sample every N epochs. Set to 0 to disable.")
     workflow.add_argument("--sample-text", default="", help="Text sentence to synthesize at each interval.")
 
@@ -144,6 +148,8 @@ def _build_parser() -> argparse.ArgumentParser:
     batch_test.add_argument("--discard-models", action="store_true", help="Delete model checkpoints after generating sample audio to save space.")
     batch_test.add_argument("--auto-calculate-epochs", action="store_true", help="Automatically calculate viable epochs based on dataset size and model architecture.")
     batch_test.add_argument("--diarize-speakers", action="store_true", help="Automatically cluster audio into separate speaker datasets")
+    batch_test.add_argument("--expected-speakers", type=int, default=0, help="Expected number of speaker clusters (0 to auto-detect based on threshold)")
+    batch_test.add_argument("--diarize-threshold", type=float, default=0.3, help="Distance threshold for speaker clustering auto-detection (used if expected-speakers is 0)")
     batch_test.add_argument("--no-stream-logs", action="store_true", help="Disable streaming of training logs to the console")
     batch_test.add_argument("--extra-overrides-json")
 
@@ -174,6 +180,8 @@ def main() -> None:
             max_segment_seconds=args.max_segment_seconds,
             segment_buffer_seconds=args.segment_buffer_seconds,
             diarize_speakers=args.diarize_speakers,
+            expected_speakers=args.expected_speakers,
+            diarize_threshold=args.diarize_threshold,
         )
         _print_json(result)
         return
@@ -222,6 +230,8 @@ def main() -> None:
             language=args.language,
             whisper_model_name=args.whisper_model,
             diarize_speakers=args.diarize_speakers,
+            expected_speakers=args.expected_speakers,
+            diarize_threshold=args.diarize_threshold,
         )
         training = train_model(
             model_key=args.model,
@@ -261,6 +271,8 @@ def main() -> None:
             language=args.language,
             whisper_model_name=args.whisper_model,
             diarize_speakers=args.diarize_speakers,
+            expected_speakers=args.expected_speakers,
+            diarize_threshold=args.diarize_threshold,
         )
         
         import shutil
