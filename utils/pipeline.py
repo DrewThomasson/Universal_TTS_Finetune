@@ -859,6 +859,14 @@ def _patch_recipe_script(
     source = _replace_keyword_value(source, "num_eval_loader_workers", "0")
     source = _replace_keyword_value(source, "mixed_precision", "False")
 
+    spec = get_model_spec(spec_key)
+    # Patch for multilingual/scratch training on single-language models
+    if not spec.supports_language and language != "en":
+        for q in ['"', "'"]:
+            source = source.replace(f'text_cleaner={q}english_cleaners{q}', f'text_cleaner={q}multilingual_cleaners{q}')
+            source = source.replace(f'text_cleaner={q}phoneme_cleaners{q}', f'text_cleaner={q}multilingual_cleaners{q}')
+            source = source.replace(f'phoneme_language={q}en-us{q}', f'phoneme_language={q}{language}{q}')
+
     if spec_key.startswith("xtts_"):
         source = _replace_keyword_value(source, "language", repr(language))
         speaker_value = f'SPEAKER_REFERENCE = [r"{reference_wav}"]'
@@ -1046,6 +1054,12 @@ def train_model(
         ensure_monotonic_align_compiled()
         
         # Resolve and download pretrained checkpoint if applicable
+        base_ckpt_path = None
+        config_path = None
+        quality = "medium"
+        sample_rate = 22050
+        espeak_language = language.lower().replace("_", "-")
+
         if restore_path:
             base_ckpt_path = Path(restore_path)
             config_path = base_ckpt_path.parent / "config.json"
@@ -1057,34 +1071,38 @@ def train_model(
                     _notify(progress, "Checkpoint config not found locally. Resolving a base config...")
                     checkpoint_info = resolve_piper_checkpoint(language)
                     _, config_path = download_piper_checkpoint(checkpoint_info, progress)
-        else:
+
+            if config_path and config_path.exists():
+                with open(config_path, "r", encoding="utf-8") as f:
+                    ckpt_config = json.load(f)
+                sample_rate = ckpt_config.get("audio", {}).get("sample_rate", 22050)
+                quality = ckpt_config.get("audio", {}).get("quality", "medium")
+                espeak_language = ckpt_config.get("espeak", {}).get("voice") or ckpt_config.get("language", {}).get("code") or espeak_language
+        elif use_pretrained:
             _notify(progress, f"Resolving Piper checkpoint for language: {language}...")
             checkpoint_info = resolve_piper_checkpoint(language)
             _notify(progress, f"Downloading checkpoint: {checkpoint_info['voice']} ({checkpoint_info['quality']})")
             base_ckpt_path, config_path = download_piper_checkpoint(checkpoint_info, progress)
-            
-        with open(config_path, "r", encoding="utf-8") as f:
-            ckpt_config = json.load(f)
-        sample_rate = ckpt_config.get("audio", {}).get("sample_rate", 22050)
-        quality = checkpoint_info.get("quality", "medium") if "checkpoint_info" in locals() else ckpt_config.get("audio", {}).get("quality", "medium")
-        
-        espeak_language = None
-        if "checkpoint_info" in locals():
+
+            with open(config_path, "r", encoding="utf-8") as f:
+                ckpt_config = json.load(f)
+            sample_rate = ckpt_config.get("audio", {}).get("sample_rate", 22050)
+            quality = checkpoint_info.get("quality", "medium")
             espeak_language = checkpoint_info["locale"].lower().replace("_", "-")
-        if not espeak_language:
-            espeak_language = ckpt_config.get("espeak", {}).get("voice") or ckpt_config.get("language", {}).get("code")
-        if not espeak_language:
-            espeak_language = language.lower().replace("_", "-")
-            
+        else:
+            _notify(progress, f"Training Piper model from scratch for language: {language}...")
+
         preprocessed_dir = training_root / "preprocessed"
-        
+        if not config_path:
+            config_path = preprocessed_dir / "config.json"
+
         run_summary = {
             "model_key": spec.key,
             "model_label": spec.label,
             "training_root": str(training_root),
             "preprocessed_dir": str(preprocessed_dir),
             "dataset_dir": str(dataset_root),
-            "base_checkpoint": str(base_ckpt_path),
+            "base_checkpoint": str(base_ckpt_path) if base_ckpt_path else "",
             "base_config": str(config_path),
             "espeak_language": espeak_language,
             "sample_rate": sample_rate,
