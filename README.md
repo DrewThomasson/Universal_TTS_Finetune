@@ -1,5 +1,5 @@
 > [!IMPORTANT]
-> This repo is being integrated into [Ebook2audiobook](https://github.com/DrewThomasson/ebook2audiobook/) Further development can be found there, if not added yet it can be found in a PR in progress 
+> This repo is being integrated into [Ebook2audiobook](https://github.com/DrewThomasson/ebook2audiobook/tree/main/components/Universal_TTS_Finetune/) Further development can be found there, if not added yet it can be found in a PR in progress 
 
 # Universal_TTS_Finetune
 
