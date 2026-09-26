@@ -68,6 +68,6 @@ python headless_cli.py train \
   --output-root ./finetune_models
 ```
 
-The checkpoint list includes only mapped starting models for that engine and language. Use `--pretrained-model-id` to select one explicitly, or omit it for the default. `python headless_cli.py --help` lists the other commands; each command also has `--help`.
+The checkpoint list includes only mapped starting models for that engine and language. Use `--pretrained-model-id` to select one explicitly, or omit it for the default. Coqui and Piper can use `--no-pretrained` to start from random weights; the CLI warns that this needs much more audio and training. XTTS and MMS/Fairseq require a starting checkpoint. `python headless_cli.py --help` lists the other commands; each command also has `--help`.
 
 For the E2A FAIRSEQ engine, choose **MMS / Fairseq VITS** in the GUI and select the matching language from [Meta's MMS catalog](https://dl.fbaipublicfiles.com/mms/tts/all-tts-languages.html). The CLI uses the published code, for example `--model mms_vits --language eng`. The finished run's `ready/fairseq/` folder contains `G_100000.pth`, `config.json`, and `vocab.txt` in the published MMS checkpoint layout.
