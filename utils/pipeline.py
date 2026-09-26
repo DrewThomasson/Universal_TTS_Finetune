@@ -1326,8 +1326,9 @@ def _patch_recipe_script(
     source = _replace_keyword_value(source, "epochs", str(epochs))
     source = _replace_keyword_value(source, "BATCH_SIZE", str(batch_size))
     source = _replace_keyword_value(source, "GRAD_ACUMM_STEPS", str(grad_accum))
-    source = _replace_keyword_value(source, "max_wav_length", str(int(max_audio_seconds * DEFAULT_SAMPLE_RATE)))
-    source = _replace_keyword_value(source, "max_audio_len", str(int(max_audio_seconds * DEFAULT_SAMPLE_RATE)))
+    recipe_sample_rate = 16000 if spec_key == "mms_vits" else DEFAULT_SAMPLE_RATE
+    source = _replace_keyword_value(source, "max_wav_length", str(int(max_audio_seconds * recipe_sample_rate)))
+    source = _replace_keyword_value(source, "max_audio_len", str(int(max_audio_seconds * recipe_sample_rate)))
     source = _replace_keyword_value(source, "num_loader_workers", "0")
     source = _replace_keyword_value(source, "num_eval_loader_workers", "0")
     source = _replace_keyword_value(source, "precompute_num_workers", "0")
@@ -1376,6 +1377,10 @@ def _patch_recipe_script(
             # We didn't find the files, point CHECKPOINTS_OUT_PATH to the shared directory so they download there and can be reused next time
             source = _replace_literal(source, 'CHECKPOINTS_OUT_PATH = os.path.join(OUT_PATH, "XTTS_v2.0_original_model_files/")', f'CHECKPOINTS_OUT_PATH = r"{resolved}"')
             source = _replace_literal(source, 'CHECKPOINTS_OUT_PATH = os.path.join(OUT_PATH, "XTTS_v1.1_original_model_files/")', f'CHECKPOINTS_OUT_PATH = r"{resolved}"')
+    elif spec_key == "mms_vits":
+        if not restore_path:
+            raise ValueError("MMS / Fairseq VITS requires a published starting checkpoint.")
+        source = source.replace("MMS_CHECKPOINT = None", f"MMS_CHECKPOINT = {restore_path!r}", 1)
     elif restore_path:
         if "restore_path=None" in source:
             source = source.replace("restore_path=None", f"restore_path=r\"{restore_path}\"", 1)
@@ -1406,6 +1411,54 @@ def _latest_matching_file(root: Path, patterns: Sequence[str]) -> Path | None:
     if not candidates:
         return None
     return max(candidates, key=lambda item: item.stat().st_mtime)
+
+
+def _mms_coqui_key(key: str) -> str:
+    """Mirror Coqui's Fairseq VITS key conversion for packaging trained weights."""
+    for old, new in (
+        ("enc_p.", "text_encoder."),
+        ("dec.", "waveform_decoder."),
+        ("enc_q.", "posterior_encoder."),
+        ("flow.flows.2.", "flow.flows.1."),
+        ("flow.flows.4.", "flow.flows.2."),
+        ("flow.flows.6.", "flow.flows.3."),
+        ("dp.flows.0.m", "duration_predictor.flows.0.translation"),
+        ("dp.flows.0.logs", "duration_predictor.flows.0.log_scale"),
+        ("dp.flows.1", "duration_predictor.flows.1"),
+        ("dp.flows.3", "duration_predictor.flows.2"),
+        ("dp.flows.5", "duration_predictor.flows.3"),
+        ("dp.flows.7", "duration_predictor.flows.4"),
+        ("dp.post_flows.0.m", "duration_predictor.post_flows.0.translation"),
+        ("dp.post_flows.0.logs", "duration_predictor.post_flows.0.log_scale"),
+        ("dp.post_flows.1", "duration_predictor.post_flows.1"),
+        ("dp.post_flows.3", "duration_predictor.post_flows.2"),
+        ("dp.post_flows.5", "duration_predictor.post_flows.3"),
+        ("dp.post_flows.7", "duration_predictor.post_flows.4"),
+        ("dp.", "duration_predictor."),
+    ):
+        if old in key:
+            return key.replace(old, new)
+    return key
+
+
+def _export_mms_checkpoint(trained_path: Path, base_path: Path, output_path: Path) -> None:
+    """Save fine-tuned generator weights in the original MMS/Fairseq layout."""
+    trained = torch.load(trained_path, map_location="cpu")["model"]
+    original = torch.load(base_path, map_location="cpu")
+    if "model" not in original:
+        raise ValueError(f"Not an MMS/Fairseq checkpoint: {base_path}")
+    updated = {}
+    for original_key in original["model"]:
+        coqui_key = _mms_coqui_key(original_key)
+        if coqui_key not in trained and coqui_key.endswith(".weight_g"):
+            coqui_key = coqui_key.removesuffix(".weight_g") + ".parametrizations.weight.original0"
+        elif coqui_key not in trained and coqui_key.endswith(".weight_v"):
+            coqui_key = coqui_key.removesuffix(".weight_v") + ".parametrizations.weight.original1"
+        if coqui_key not in trained:
+            raise KeyError(f"Trained MMS checkpoint lacks {coqui_key}")
+        updated[original_key] = trained[coqui_key].cpu()
+    original["model"] = updated
+    torch.save(original, output_path)
 
 
 def _pick_reference_wav(dataset_dir: Path, dataset_info: dict[str, Any]) -> str:
@@ -1448,6 +1501,7 @@ def _finalize_training_artifacts(
     training_root: Path,
     dataset_dir: Path,
     reference_wav: str,
+    base_checkpoint: str | None = None,
 ) -> dict[str, Any]:
     spec = get_model_spec(spec_key)
     ready_dir = training_root / "ready"
@@ -1468,14 +1522,20 @@ def _finalize_training_artifacts(
     if config_path is None:
         raise FileNotFoundError(f"config.json was not found for {spec.label}.")
 
-    ready_checkpoint = ready_dir / "model.pth"
-    if spec.family == "xtts":
+    ready_model_dir = ready_dir / "fairseq" if spec.family == "mms" else ready_dir
+    ready_model_dir.mkdir(parents=True, exist_ok=True)
+    ready_checkpoint = ready_model_dir / ("G_100000.pth" if spec.family == "mms" else "model.pth")
+    if spec.family == "mms":
+        if not base_checkpoint:
+            raise ValueError("MMS base checkpoint is needed to preserve its vocabulary and Fairseq format.")
+        _export_mms_checkpoint(checkpoint, Path(base_checkpoint), ready_checkpoint)
+    elif spec.family == "xtts":
         _optimize_xtts_checkpoint(checkpoint, ready_checkpoint)
     else:
         shutil.copy2(checkpoint, ready_checkpoint)
 
-    ready_config = ready_dir / "config.json"
-    shutil.copy2(config_path, ready_config)
+    ready_config = ready_model_dir / "config.json"
+    shutil.copy2(Path(base_checkpoint).parent / "config.json" if spec.family == "mms" else config_path, ready_config)
 
     artifacts: dict[str, Any] = {
         "model_key": spec.key,
@@ -1493,6 +1553,11 @@ def _finalize_training_artifacts(
         ready_reference = ready_dir / "reference.wav"
         shutil.copy2(reference_wav, ready_reference)
         artifacts["reference_wav"] = str(ready_reference)
+
+    if spec.family == "mms":
+        ready_vocab = ready_model_dir / "vocab.txt"
+        shutil.copy2(Path(base_checkpoint).parent / "vocab.txt", ready_vocab)
+        artifacts["vocab"] = str(ready_vocab)
 
     if spec.family == "xtts":
         vocab = _latest_matching_file(workspace_root, ["vocab.json"])
@@ -1606,7 +1671,7 @@ def train_model(
     sample_text: str = "",
 ) -> dict[str, Any]:
     spec = get_model_spec(model_key)
-    language = normalize_language(language)
+    language = language.lower() if model_key == "mms_vits" else normalize_language(language)
     if spec.family == "xtts" and not pretrained_model_choices(model_key, language):
         raise ValueError(f"{spec.label} does not support language {language}.")
     dataset_root = _normalize_dataset_dir(dataset_dir, output_root)
@@ -1846,6 +1911,7 @@ def train_model(
         training_root=training_root,
         dataset_dir=dataset_root,
         reference_wav=str(reference_wav) if reference_wav else "",
+        base_checkpoint=computed_restore_path,
     )
     artifacts["log_path"] = str(log_path)
     artifacts["trained_steps"] = trained_steps
@@ -1938,14 +2004,30 @@ def _load_tts_runtime(artifacts: dict[str, Any], progress: ProgressCallback) -> 
         vocoder_path, vocoder_config = _download_vocoder(artifacts["default_vocoder_id"], progress)
         artifacts["vocoder_path"] = vocoder_path
         artifacts["vocoder_config"] = vocoder_config
-    runtime = TTS(
-        model_path=artifacts["checkpoint"],
-        config_path=artifacts["config"],
-        vocoder_path=vocoder_path,
-        vocoder_config_path=vocoder_config,
-        gpu=torch.cuda.is_available(),
-        progress_bar=False,
-    )
+    if artifacts["family"] == "mms":
+        import inspect
+        from TTS.utils.synthesizer import Synthesizer
+
+        runtime = TTS(progress_bar=False)
+        if "model_dir" in inspect.signature(Synthesizer).parameters:
+            runtime.synthesizer = Synthesizer(
+                model_dir=str(Path(artifacts["checkpoint"]).parent),
+                use_cuda=torch.cuda.is_available(),
+            )
+        else:
+            runtime.synthesizer = Synthesizer(
+                tts_checkpoint=artifacts["checkpoint"],
+                use_cuda=torch.cuda.is_available(),
+            )
+    else:
+        runtime = TTS(
+            model_path=artifacts["checkpoint"],
+            config_path=artifacts["config"],
+            vocoder_path=vocoder_path,
+            vocoder_config_path=vocoder_config,
+            gpu=torch.cuda.is_available(),
+            progress_bar=False,
+        )
     MODEL_CACHE[cache_key] = runtime
     return runtime
 
