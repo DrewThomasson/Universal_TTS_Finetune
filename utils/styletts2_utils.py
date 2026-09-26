@@ -196,9 +196,10 @@ def train_styletts2(
     train_rows = _read_uft_rows(dataset, "train")
     val_rows = _read_uft_rows(dataset, "val")
 
+    gpu_total_gib = None
     if not dry_run:
         cuda_probe = subprocess.run(
-            [python_executable, "-c", "import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)"],
+            [python_executable, "-c", "import torch,sys; print(torch.cuda.get_device_properties(0).total_memory / 1024**3) if torch.cuda.is_available() else sys.exit(1)"],
             check=False,
             capture_output=True,
             text=True,
@@ -208,6 +209,7 @@ def train_styletts2(
                 "StyleTTS2 fine-tuning needs CUDA in its training Python environment. "
                 "CPU RAM does not replace GPU VRAM; no training process was started."
             )
+        gpu_total_gib = float(cuda_probe.stdout.strip().splitlines()[-1])
 
     root.mkdir(parents=True, exist_ok=True)
     data_root = root / "data" / "wavs"
@@ -245,6 +247,12 @@ def train_styletts2(
     if not isinstance(config, dict):
         raise ValueError(f"Invalid upstream StyleTTS2 config: {paths['config']}")
     config.update({"log_dir": str(log_dir), "epochs": int(epochs), "batch_size": int(batch_size), "device": "cuda"})
+    if gpu_total_gib is not None and gpu_total_gib < 16:
+        # The official recipe's 400-frame crops and SLM adversarial phase can
+        # overrun a 12 GiB card. Keep the initial acoustic fine-tuning stage.
+        config["max_len"] = min(int(config.get("max_len", 400)), 200)
+        config.setdefault("loss_params", {})["joint_epoch"] = int(epochs) + 1
+        _notify(progress, f"StyleTTS2 low-memory profile: {gpu_total_gib:.1f} GiB GPU, max_len={config['max_len']}, SLM adversarial phase disabled.")
     config["save_freq"] = 1
     config["pretrained_model"] = str(paths["checkpoint"])
     config["second_stage_load_pretrained"] = True
@@ -290,6 +298,7 @@ def train_styletts2(
         "validation_manifest": str(val_list),
         "log_path": str(log_path),
         "command": command,
+        "gpu_total_gib": gpu_total_gib,
     }
     if dry_run:
         result["status"] = "dry-run"
@@ -327,6 +336,17 @@ def train_styletts2(
     checkpoints = sorted(log_dir.glob("epoch_2nd_*.pth"), key=lambda item: item.stat().st_mtime)
     if not checkpoints:
         raise FileNotFoundError(f"StyleTTS2 finished without an epoch_2nd checkpoint under {log_dir}")
+    step_probe = subprocess.run(
+        [python_executable, "-c", "import sys,torch; print(int(torch.load(sys.argv[1], map_location='cpu', weights_only=False).get('iters', 0)))", str(checkpoints[-1])],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if step_probe.returncode:
+        raise RuntimeError(f"Could not verify StyleTTS2 optimizer steps in {checkpoints[-1]}: {step_probe.stderr.strip()[-1000:]}")
+    trained_steps = int(step_probe.stdout.strip().splitlines()[-1])
+    if trained_steps < 1:
+        raise RuntimeError(f"StyleTTS2 saved {checkpoints[-1]} without a completed training step.")
     ready = root / "ready"
     ready.mkdir(parents=True, exist_ok=True)
     final_checkpoint = ready / "model.pth"
@@ -340,8 +360,9 @@ def train_styletts2(
         "upstream_checkpoint": str(checkpoints[-1].resolve()),
         "artifacts_file": str(ready / "artifacts.json"),
         "status": "complete",
+        "trained_steps": trained_steps,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "inference_note": "Use the official StyleTTS2 inference notebook/runtime; this is not a Coqui model export.",
+        "inference_note": "UFT inference uses the official LibriTTS model flow; requires local StyleTTS2 source/assets and a speaker reference WAV.",
     }
     artifacts_file = ready / "artifacts.json"
     artifacts_file.write_text(json.dumps(artifacts, indent=2), encoding="utf-8")
