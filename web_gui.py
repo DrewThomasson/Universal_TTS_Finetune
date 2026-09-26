@@ -48,7 +48,10 @@ from utils.pipeline import (
     pause_training,
     resume_training,
 )
-from utils.model_registry import pretrained_model_choices
+from utils.model_registry import MMS_LANGUAGES, XTTS_LANGUAGES, pretrained_model_choices
+from utils.asr import MMS_ASR_LANGUAGES
+from utils.e2a_export import export_e2a_zip
+from utils.language_support import coqui_phoneme_language
 
 LANGUAGE_CHOICES = [
     "en",
@@ -72,8 +75,50 @@ LANGUAGE_CHOICES = [
     "hr", "lt", "lv", "mt", "ro", "sk", "sl", "sr", "sv", "ca",
     "cy", "is", "ka", "kk", "lb", "ne", "no", "sw", "ur", "vi",
 ]
+# Published Piper training checkpoints include these languages in addition to
+# the shared language list. zh-cn in the shared list resolves to Piper's zh family.
+PIPER_LANGUAGE_CHOICES = sorted(set(LANGUAGE_CHOICES) | {
+    "bn", "he", "id", "ku", "ml", "mr", "te", "th",
+})
+VITS_LANGUAGE_CHOICES = sorted(set(LANGUAGE_CHOICES) | {"bn"})
+XTTS_LANGUAGE_CHOICES = {
+    key: [language for language in LANGUAGE_CHOICES if language in supported]
+    for key, supported in XTTS_LANGUAGES.items()
+}
 WHISPER_CHOICES = ["large-v3", "large-v2", "large", "distil-large-v3", "distil-large-v2", "medium", "medium.en", "small", "small.en", "base", "base.en", "tiny", "tiny.en"]
 MODEL_CHOICES = [(label, key) for key, label in dropdown_choices()]
+MMS_LANGUAGE_CHOICES = [(f"{name} ({code})", code) for code, name in MMS_LANGUAGES.items()]
+DATASET_LANGUAGE_CHOICES = LANGUAGE_CHOICES + [
+    (f"{MMS_LANGUAGES.get(code, code)} ({code})", code)
+    for code in sorted(MMS_ASR_LANGUAGES) if code not in LANGUAGE_CHOICES
+]
+
+
+def _phonemizer_language_choices(choices):
+    supported = []
+    for language in choices:
+        try:
+            coqui_phoneme_language(language)
+            supported.append(language)
+        except ValueError:
+            pass
+    return supported
+
+
+def update_finetune_language_choices(model_key):
+    if model_key in XTTS_LANGUAGE_CHOICES:
+        return gr.update(choices=XTTS_LANGUAGE_CHOICES[model_key], value="en")
+    if model_key == "mms_vits":
+        return gr.update(choices=MMS_LANGUAGE_CHOICES, value="eng")
+    if model_key == "piper":
+        return gr.update(choices=PIPER_LANGUAGE_CHOICES, value="en")
+    if model_key == "vits_tts":
+        choices = _phonemizer_language_choices(VITS_LANGUAGE_CHOICES)
+    elif model_key == "align_tts":
+        choices = ["en"]
+    else:
+        choices = _phonemizer_language_choices(LANGUAGE_CHOICES)
+    return gr.update(choices=choices, value="en" if "en" in choices else (choices[0] if choices else None))
 
 
 class PreprocessProgressTracker:
@@ -323,7 +368,7 @@ def _clean_audio_path(path_val):
 
 
 def preprocess_dataset(
-    audio_files, audio_dir, transcript_file, language, whisper_model, out_path, dataset_name, diarize_speakers,
+    audio_files, audio_dir, transcript_file, language, whisper_model, asr_backend, out_path, dataset_name, diarize_speakers,
     expected_speakers=0, diarize_threshold=0.3,
     generate_synthetic=False, synthetic_audio_file=None, synthetic_vtt_file=None,
     auto_split_sentences=True,
@@ -353,6 +398,7 @@ def preprocess_dataset(
             transcript_file=_path_value(transcript_file),
             language=language,
             whisper_model_name=whisper_model,
+            asr_backend=asr_backend,
             dataset_name=dataset_name or "LJSpeech-1.1",
             diarize_speakers=diarize_speakers,
             expected_speakers=int(expected_speakers or 0),
@@ -570,6 +616,16 @@ def run_inference(artifacts_path, model_key, language, tts_text, speaker_audio_f
         return format_exception(exc), None, None
 
 
+def export_for_e2a(artifacts_path, out_path):
+    try:
+        artifacts = load_artifacts(artifacts_path)
+        destination = Path(out_path).expanduser().resolve() / "exports" / f"{artifacts['model_key']}-{Path(artifacts['training_root']).name}-e2a.zip"
+        result = export_e2a_zip(artifacts, str(destination))
+        return f"E2A upload ZIP created: {', '.join(result['files'])}", result["zip_file"]
+    except Exception as exc:
+        return f"E2A export failed: {exc}", None
+
+
 def on_model_change(selected_model):
     try:
         from utils.model_registry import get_model_spec
@@ -615,7 +671,11 @@ def update_checkpoint_choices(model_key, language):
             for item in checkpoints
         ]
     else:
-        choices = [(model_id.split("/")[2].replace("_", " ").title(), model_id) for model_id in pretrained_model_choices(model_key, language)]
+        choices = [
+            (f"{parts[2].replace('_', ' ').title()} · {parts[3].replace('_', ' ').title()}", model_id)
+            for model_id in pretrained_model_choices(model_key, language)
+            for parts in [model_id.split("/")]
+        ]
     return gr.update(choices=choices, value=choices[0][1] if choices else None, interactive=bool(choices))
 
 
@@ -630,6 +690,14 @@ def update_training_options(model_key, language, use_pretrained, pretrained_mode
     except Exception as exc:
         return f"Error loading model spec: {exc}", gr.update()
 
+    if family == "tts" and model_key != "align_tts":
+        try:
+            coqui_phoneme_language(language)
+        except ValueError as exc:
+            return f"❌ **{model_label}** cannot train `{language}`: {exc}", gr.update(value=False, interactive=False)
+    if model_key == "align_tts" and language != "en":
+        return "❌ Align TTS currently uses an English-only character vocabulary. Choose `en`.", gr.update(value=False, interactive=False)
+
     # 1. XTTS family
     if family == "xtts":
         if not choices:
@@ -643,41 +711,68 @@ def update_training_options(model_key, language, use_pretrained, pretrained_mode
 
     # 2. Piper family
     elif family == "piper":
-        from utils.piper_utils import resolve_piper_checkpoint
+        from utils.piper_utils import normalize_espeak_language, resolve_piper_checkpoint
         try:
             lang = language.split("-")[0].split("_")[0].lower()
             selected_id = pretrained_model_id if pretrained_model_id and pretrained_model_id.startswith(f"piper:{lang}/") else None
             checkpoint_info = resolve_piper_checkpoint(language, checkpoint_id=selected_id)
         except (LookupError, ValueError) as exc:
+            checkpoint_info = None
+            checkpoint_error = exc
+        voice_language = checkpoint_info["locale"].lower().replace("_", "-") if checkpoint_info else language
+        try:
+            phoneme_language = normalize_espeak_language(voice_language)
+        except ValueError as exc:
+            return f"❌ **Piper TTS** cannot train `{language}`: {exc}", gr.update(value=False, interactive=False)
+        if checkpoint_info is None:
             return (
-                f"🟡 **Piper TTS** has no matching training checkpoint for `{language}`: {exc}. Training from scratch remains available.",
+                f"🟡 **Piper TTS** has no matching training checkpoint for `{language}`: {checkpoint_error}. "
+                "Training from scratch remains available, but usually needs hours of audio and much longer training for intelligible speech.",
                 gr.update(value=False, interactive=False),
             )
         msg = f"🟢 **Piper TTS** has a `{language}` training checkpoint: `{checkpoint_info['id']}`.\n\n"
+        if phoneme_language != voice_language:
+            msg += f"Piper will use eSpeak voice `{phoneme_language}` for `{voice_language}`.\n\n"
         if use_pretrained:
             msg += "Fine-tuning will download and load this checkpoint."
         else:
-            msg += "Training will start from scratch."
+            msg += "Training will start from scratch. A larger dataset (hours of audio) and much longer training are usually needed for intelligible speech."
         return msg, gr.update(interactive=True)
 
-    # 3. Single-language models
+    # 3. MMS checkpoints use a published language-specific generator and vocab.
+    elif family == "mms":
+        if not official_model_id:
+            return f"❌ **{model_label}** has no published checkpoint for `{language}`.", gr.update(value=False, interactive=False)
+        return (
+            f"🟢 **{model_label}** uses `{official_model_id}`. Meta publishes these checkpoints under CC BY-NC 4.0. "
+            "Keep pretrained loading enabled to fine-tune this language's generator and vocabulary.",
+            gr.update(value=True, interactive=True),
+        )
+
+    # 4. Single-language models
     else:
         if official_model_id:
             msg = f"🟢 **{model_label}** has a pre-trained `{language}` checkpoint mapped: `{official_model_id}`.\n\n"
             if use_pretrained:
                 msg += "Fine-tuning will download and use this pre-trained base model."
             else:
-                msg += "**Training from scratch** (random initialization). This means the model weights start completely blank."
+                msg += (
+                    "**Training from scratch** (random initialization). The model weights start blank, "
+                    "so it must learn this language and speech from your dataset. Expect hours of audio "
+                    "and substantially longer training for intelligible speech."
+                )
+            if family == "tts" and model_key != "align_tts":
+                msg += "\n\nUFT checks the dataset's phoneme symbols before training. If the mapped checkpoint cannot represent them, select training from scratch."
             return msg, gr.update(interactive=True)
         else:
             msg = f"🟡 **{model_label}** has no pre-trained checkpoint mapped for `{language}`.\n\n"
-            msg += "**Training from scratch** (random initialization) is required. *Training from scratch means the model starts with random weights and requires a larger dataset (hours of audio) and longer training (e.g. 100k+ steps) to sound intelligible.*\n\n"
-            msg += f"The backend adapts the recipe to the `{language}` phonemizer when available."
+            msg += "**Training from scratch** (random initialization) is required. The model must learn this language and speech from your dataset; expect hours of audio and substantially longer training for intelligible speech.\n\n"
+            msg += f"The backend adapts the recipe and phoneme vocabulary to the `{language}` dataset when available."
             return msg, gr.update(value=False, interactive=False)
 
 
 def preprocess_and_train(
-    audio_files, audio_dir, transcript_file, language, whisper_model, out_path, dataset_name, diarize_speakers,
+    audio_files, audio_dir, transcript_file, language, whisper_model, asr_backend, out_path, dataset_name, diarize_speakers,
     expected_speakers, diarize_threshold,
     generate_synthetic, synthetic_audio_file, synthetic_vtt_file,
     model_key, train_language, num_epochs, batch_size, grad_accum, max_audio_length, restore_path, use_pretrained, pretrained_model_id, extra_overrides_json,
@@ -689,7 +784,7 @@ def preprocess_and_train(
     try:
         progress(0, desc="Starting step 1: Preprocessing dataset...")
         preprocess_res = preprocess_dataset(
-            audio_files, audio_dir, transcript_file, language, whisper_model, out_path, dataset_name, diarize_speakers,
+            audio_files, audio_dir, transcript_file, language, whisper_model, asr_backend, out_path, dataset_name, diarize_speakers,
             expected_speakers, diarize_threshold,
             generate_synthetic, synthetic_audio_file, synthetic_vtt_file,
             auto_split_sentences,
@@ -785,12 +880,13 @@ if __name__ == "__main__":
             auto_split_sentences = gr.Checkbox(label="Auto-split sentences for forced alignment (plain text input)", value=True)
             gr.Markdown(
                 "💡 **How to provide text/transcripts:**\n"
-                "- **None (Auto-detect / Whisper)**: Leave blank to auto-transcribe. If you point to an **Audio folder path** containing matching `.vtt` or `.txt` files with the exact same base name as your audio files (e.g., `chapter1.mp3` and `chapter1.txt`), the system will automatically match them to slice or run Forced Alignment. Any audio files without matching transcripts will automatically fallback to Whisper.\n"
+                "- **None (auto-transcribe)**: Leave blank to transcribe. If an **Audio folder path** contains matching `.vtt` or `.txt` files (e.g., `chapter1.mp3` and `chapter1.txt`), the app uses those first. For files without text, Auto uses Whisper with short language codes and MMS ASR with three-letter codes.\n"
                 "- **WebVTT (.vtt)**: Upload a WebVTT file along with the full audiobook file (e.g. generated by `ebook2audiobook`) to slice it instantly with 0% transcription errors.\n"
                 "- **Plain Text (.txt) - Forced Alignment**: Upload a plain text book file (e.g. converted from ePUB using Calibre) along with a single full audiobook file to run **Forced Alignment**. If the text contains multiple sentences on a line or is a single paragraph, leave **Auto-split sentences for forced alignment** checked to automatically chunk it into sentences.\n"
                 "- **Transcript Map (.csv, .tsv, .json, or delimited .txt)**: Upload a mapping file of `audio_file|text` matching a folder of pre-split audio files."
             )
-            language = gr.Dropdown(label="Dataset language", choices=LANGUAGE_CHOICES, value="en")
+            language = gr.Dropdown(label="Dataset language", choices=DATASET_LANGUAGE_CHOICES, value="en", allow_custom_value=True)
+            asr_backend = gr.Dropdown(label="Transcription backend (used only when text is missing)", choices=["auto", "whisper", "mms"], value="auto")
             whisper_model = gr.Dropdown(label="Whisper model", choices=WHISPER_CHOICES, value="small", allow_custom_value=True)
             diarize_speakers = gr.Checkbox(label="Diarize speakers (split multi-speaker audio)", value=False)
             with gr.Row(visible=False) as diarize_options:
@@ -865,7 +961,7 @@ if __name__ == "__main__":
                 allow_custom_value=True,
                 interactive=True,
             )
-            train_language = gr.Dropdown(label="Fine-tuning language", choices=LANGUAGE_CHOICES, value="en", info="Choose your dataset language; available base checkpoints update automatically.")
+            train_language = gr.Dropdown(label="Fine-tuning language", choices=XTTS_LANGUAGE_CHOICES["xtts_v2"], value="en", info="Choose your dataset language; available base checkpoints update automatically. MMS uses its published three-letter language codes.")
             with gr.Row():
                 restore_model_dropdown = gr.Dropdown(
                     label="Resume from previous training run",
@@ -931,13 +1027,17 @@ if __name__ == "__main__":
                 type="filepath",
                 sources=["upload"],
             )
-            infer_language = gr.Dropdown(label="Inference language", choices=LANGUAGE_CHOICES, value="en")
+            infer_language = gr.Dropdown(label="Inference language", choices=XTTS_LANGUAGE_CHOICES["xtts_v2"], value="en")
             tts_text = gr.Textbox(label="Input text", value="This fine-tuned model is ready to test.")
             infer_status = gr.Textbox(label="Status", interactive=False)
             generated_audio = gr.Audio(label="Generated audio")
             used_reference_audio = gr.Audio(label="Reference audio used")
             inspect_btn = gr.Button(value="Inspect artifacts")
             tts_btn = gr.Button(value="Step 3 - Generate speech", elem_classes=["primary-btn"])
+            gr.Markdown("### E2A custom model upload")
+            e2a_export_btn = gr.Button(value="Create E2A upload ZIP")
+            e2a_export_status = gr.Textbox(label="Export status", interactive=False)
+            e2a_export_file = gr.File(label="Download E2A ZIP", interactive=False)
 
         prepare_btn.click(
             fn=preprocess_dataset,
@@ -947,6 +1047,7 @@ if __name__ == "__main__":
                 transcript_file,
                 language,
                 whisper_model,
+                asr_backend,
                 out_path,
                 dataset_name,
                 diarize_speakers,
@@ -1012,6 +1113,7 @@ if __name__ == "__main__":
                 transcript_file,
                 language,
                 whisper_model,
+                asr_backend,
                 out_path,
                 dataset_name,
                 diarize_speakers,
@@ -1159,6 +1261,12 @@ if __name__ == "__main__":
             outputs=[infer_status, generated_audio, used_reference_audio],
         )
 
+        e2a_export_btn.click(
+            fn=export_for_e2a,
+            inputs=[infer_artifacts, out_path],
+            outputs=[e2a_export_status, e2a_export_file],
+        )
+
         def toggle_diarize_options(visible):
             return gr.update(visible=visible)
 
@@ -1179,11 +1287,18 @@ if __name__ == "__main__":
             outputs=[num_epochs, batch_size],
         )
         model_key.change(
+            fn=update_finetune_language_choices,
+            inputs=[model_key],
+            outputs=[train_language],
+        ).then(
+            fn=update_checkpoint_choices,
+            inputs=[model_key, train_language],
+            outputs=[pretrained_model_id],
+        ).then(
             fn=update_training_options,
             inputs=[model_key, train_language, use_pretrained, pretrained_model_id],
             outputs=[model_checkpoint_warning, use_pretrained],
         )
-        model_key.change(fn=update_checkpoint_choices, inputs=[model_key, train_language], outputs=[pretrained_model_id])
         train_language.change(
             fn=update_training_options,
             inputs=[model_key, train_language, use_pretrained, pretrained_model_id],
@@ -1211,6 +1326,11 @@ if __name__ == "__main__":
             fn=on_model_change,
             inputs=[infer_model_key],
             outputs=[speaker_reference_audio, used_reference_audio],
+        )
+        infer_model_key.change(
+            fn=update_finetune_language_choices,
+            inputs=[infer_model_key],
+            outputs=[infer_language],
         )
         infer_model_key.change(
             fn=update_trained_models,

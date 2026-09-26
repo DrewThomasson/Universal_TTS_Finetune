@@ -43,6 +43,7 @@ from dataclasses import asdict
 import os
 from pathlib import Path
 from utils.model_paths import get_models_dir
+from utils.language_support import coqui_dataset_extra_symbols, coqui_phoneme_language
 
 _PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 _MODELS_DIR = get_models_dir()
@@ -587,6 +588,7 @@ def prepare_dataset(
     transcript_file: str | None = None,
     language: str = "en",
     whisper_model_name: str = "small",
+    asr_backend: str = "auto",
     eval_percentage: float = DEFAULT_EVAL_PERCENTAGE,
     shuffle_seed: int = DEFAULT_SHUFFLE_SEED,
     min_segment_seconds: float = DEFAULT_MIN_SEGMENT_SECONDS,
@@ -668,23 +670,30 @@ def prepare_dataset(
 
     transcript_map = {} if (global_is_vtt or not transcript_file) else _load_transcript_map(transcript_file)
     
-    # Check if Whisper is needed for any of the files in the batch
-    use_whisper = False
+    # Exact transcripts and alignment files always take precedence over ASR.
+    use_asr = False
     if not transcript_file:
         for audio_file in resolved_audio_files:
             audio_path = Path(audio_file).expanduser().resolve()
             if not audio_path.with_suffix(".vtt").exists() and not audio_path.with_suffix(".txt").exists():
-                use_whisper = True
+                use_asr = True
                 break
     else:
-        use_whisper = not transcript_map and not global_is_vtt
+        use_asr = not transcript_map and not global_is_vtt
 
-    asr_model: WhisperModel | None = None
-    if use_whisper:
+    asr_model = None
+    selected_asr = None
+    if use_asr:
+        from utils.asr import MMSTranscriber, select_asr_backend
+        selected_asr = select_asr_backend(asr_backend, language)
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        compute_type = "float16" if torch.cuda.is_available() else "float32"
-        _notify(progress, f"Loading Whisper model '{whisper_model_name}' on {device}...")
-        asr_model = WhisperModel(whisper_model_name, device=device, compute_type=compute_type, download_root=str(_MODELS_DIR))
+        if selected_asr == "mms":
+            _notify(progress, f"Loading MMS ASR adapter for '{language}' on {device}...")
+            asr_model = MMSTranscriber(language, str(_MODELS_DIR), device)
+        else:
+            compute_type = "float16" if torch.cuda.is_available() else "float32"
+            _notify(progress, f"Loading Whisper model '{whisper_model_name}' on {device}...")
+            asr_model = WhisperModel(whisper_model_name, device=device, compute_type=compute_type, download_root=str(_MODELS_DIR))
 
     entries: list[dict[str, Any]] = []
     total_seconds = 0.0
@@ -726,7 +735,7 @@ def prepare_dataset(
                 )
                 local_is_vtt = True
             else:
-                _notify(progress, f"⚠️ No matching VTT or TXT found for {audio_path.name}. Whisper will be used to transcribe.")
+                _notify(progress, f"No matching VTT or TXT found for {audio_path.name}. {selected_asr} ASR will transcribe it.")
 
         # 2. Get audio metadata and optionally convert to temporary WAV for fast seeking
         temp_wav_path = None
@@ -850,16 +859,19 @@ def prepare_dataset(
             continue
 
         assert asr_model is not None
-        segments, _ = asr_model.transcribe(
-            str(audio_path),
-            language=language,
-            vad_filter=True,
-            word_timestamps=True,
-            condition_on_previous_text=False,
-        )
-        words = _extract_transcribed_words(segments)
+        if selected_asr == "mms":
+            words = asr_model.transcribe_words(str(audio_path))
+        else:
+            segments, _ = asr_model.transcribe(
+                str(audio_path),
+                language=language.lower().replace("_", "-").split("-", 1)[0],
+                vad_filter=True,
+                word_timestamps=True,
+                condition_on_previous_text=False,
+            )
+            words = _extract_transcribed_words(segments)
         if not words:
-            _notify(progress, f"Warning: Whisper did not return timestamped words for {audio_path.name}. Skipping this file.")
+            _notify(progress, f"Warning: {selected_asr} ASR did not return timestamped words for {audio_path.name}. Skipping this file.")
             continue
 
         clip_index = 0
@@ -1278,6 +1290,7 @@ def _patch_recipe_script(
     trusted_pretrained_restore: bool,
     extra_overrides: dict[str, Any],
     reference_wav: str,
+    extra_phonemes: str,
 ) -> list[str]:
     source = script_path.read_text(encoding="utf-8")
     if trusted_pretrained_restore:
@@ -1326,8 +1339,9 @@ def _patch_recipe_script(
     source = _replace_keyword_value(source, "epochs", str(epochs))
     source = _replace_keyword_value(source, "BATCH_SIZE", str(batch_size))
     source = _replace_keyword_value(source, "GRAD_ACUMM_STEPS", str(grad_accum))
-    source = _replace_keyword_value(source, "max_wav_length", str(int(max_audio_seconds * DEFAULT_SAMPLE_RATE)))
-    source = _replace_keyword_value(source, "max_audio_len", str(int(max_audio_seconds * DEFAULT_SAMPLE_RATE)))
+    recipe_sample_rate = 16000 if spec_key == "mms_vits" else DEFAULT_SAMPLE_RATE
+    source = _replace_keyword_value(source, "max_wav_length", str(int(max_audio_seconds * recipe_sample_rate)))
+    source = _replace_keyword_value(source, "max_audio_len", str(int(max_audio_seconds * recipe_sample_rate)))
     source = _replace_keyword_value(source, "num_loader_workers", "0")
     source = _replace_keyword_value(source, "num_eval_loader_workers", "0")
     source = _replace_keyword_value(source, "precompute_num_workers", "0")
@@ -1343,7 +1357,25 @@ def _patch_recipe_script(
         for q in ['"', "'"]:
             source = source.replace(f'text_cleaner={q}english_cleaners{q}', f'text_cleaner={q}multilingual_cleaners{q}')
             source = source.replace(f'text_cleaner={q}phoneme_cleaners{q}', f'text_cleaner={q}multilingual_cleaners{q}')
-            source = source.replace(f'phoneme_language={q}en-us{q}', f'phoneme_language={q}{language}{q}')
+            source = source.replace(
+                f'phoneme_language={q}en-us{q}',
+                f'phoneme_language={q}{coqui_phoneme_language(language)}{q}',
+            )
+
+    if extra_phonemes:
+        tokenizer_call = re.search(
+            r"(?m)^tokenizer, config = TTSTokenizer\.init_from_config\((\w+)\)", source
+        )
+        if not tokenizer_call:
+            raise ValueError(f"Could not expand the {spec_key} recipe's phoneme vocabulary.")
+        config_name = tokenizer_call.group(1)
+        expansion = (
+            "from TTS.tts.utils.text.characters import IPAPhonemes as _UftIPAPhonemes\n"
+            f"{config_name}.characters = _UftIPAPhonemes("
+            f"characters=_UftIPAPhonemes().characters + {extra_phonemes!r}"
+            ").to_config()\n"
+        )
+        source = source[:tokenizer_call.start()] + expansion + source[tokenizer_call.start():]
 
     if spec_key.startswith("xtts_"):
         # With START_WITH_EVAL=True the Trainer skips training in its first
@@ -1376,6 +1408,10 @@ def _patch_recipe_script(
             # We didn't find the files, point CHECKPOINTS_OUT_PATH to the shared directory so they download there and can be reused next time
             source = _replace_literal(source, 'CHECKPOINTS_OUT_PATH = os.path.join(OUT_PATH, "XTTS_v2.0_original_model_files/")', f'CHECKPOINTS_OUT_PATH = r"{resolved}"')
             source = _replace_literal(source, 'CHECKPOINTS_OUT_PATH = os.path.join(OUT_PATH, "XTTS_v1.1_original_model_files/")', f'CHECKPOINTS_OUT_PATH = r"{resolved}"')
+    elif spec_key == "mms_vits":
+        if not restore_path:
+            raise ValueError("MMS / Fairseq VITS requires a published starting checkpoint.")
+        source = source.replace("MMS_CHECKPOINT = None", f"MMS_CHECKPOINT = {restore_path!r}", 1)
     elif restore_path:
         if "restore_path=None" in source:
             source = source.replace("restore_path=None", f"restore_path=r\"{restore_path}\"", 1)
@@ -1406,6 +1442,54 @@ def _latest_matching_file(root: Path, patterns: Sequence[str]) -> Path | None:
     if not candidates:
         return None
     return max(candidates, key=lambda item: item.stat().st_mtime)
+
+
+def _mms_coqui_key(key: str) -> str:
+    """Mirror Coqui's Fairseq VITS key conversion for packaging trained weights."""
+    for old, new in (
+        ("enc_p.", "text_encoder."),
+        ("dec.", "waveform_decoder."),
+        ("enc_q.", "posterior_encoder."),
+        ("flow.flows.2.", "flow.flows.1."),
+        ("flow.flows.4.", "flow.flows.2."),
+        ("flow.flows.6.", "flow.flows.3."),
+        ("dp.flows.0.m", "duration_predictor.flows.0.translation"),
+        ("dp.flows.0.logs", "duration_predictor.flows.0.log_scale"),
+        ("dp.flows.1", "duration_predictor.flows.1"),
+        ("dp.flows.3", "duration_predictor.flows.2"),
+        ("dp.flows.5", "duration_predictor.flows.3"),
+        ("dp.flows.7", "duration_predictor.flows.4"),
+        ("dp.post_flows.0.m", "duration_predictor.post_flows.0.translation"),
+        ("dp.post_flows.0.logs", "duration_predictor.post_flows.0.log_scale"),
+        ("dp.post_flows.1", "duration_predictor.post_flows.1"),
+        ("dp.post_flows.3", "duration_predictor.post_flows.2"),
+        ("dp.post_flows.5", "duration_predictor.post_flows.3"),
+        ("dp.post_flows.7", "duration_predictor.post_flows.4"),
+        ("dp.", "duration_predictor."),
+    ):
+        if old in key:
+            return key.replace(old, new)
+    return key
+
+
+def _export_mms_checkpoint(trained_path: Path, base_path: Path, output_path: Path) -> None:
+    """Save fine-tuned generator weights in the original MMS/Fairseq layout."""
+    trained = torch.load(trained_path, map_location="cpu")["model"]
+    original = torch.load(base_path, map_location="cpu")
+    if "model" not in original:
+        raise ValueError(f"Not an MMS/Fairseq checkpoint: {base_path}")
+    updated = {}
+    for original_key in original["model"]:
+        coqui_key = _mms_coqui_key(original_key)
+        if coqui_key not in trained and coqui_key.endswith(".weight_g"):
+            coqui_key = coqui_key.removesuffix(".weight_g") + ".parametrizations.weight.original0"
+        elif coqui_key not in trained and coqui_key.endswith(".weight_v"):
+            coqui_key = coqui_key.removesuffix(".weight_v") + ".parametrizations.weight.original1"
+        if coqui_key not in trained:
+            raise KeyError(f"Trained MMS checkpoint lacks {coqui_key}")
+        updated[original_key] = trained[coqui_key].cpu()
+    original["model"] = updated
+    torch.save(original, output_path)
 
 
 def _pick_reference_wav(dataset_dir: Path, dataset_info: dict[str, Any]) -> str:
@@ -1448,6 +1532,7 @@ def _finalize_training_artifacts(
     training_root: Path,
     dataset_dir: Path,
     reference_wav: str,
+    base_checkpoint: str | None = None,
 ) -> dict[str, Any]:
     spec = get_model_spec(spec_key)
     ready_dir = training_root / "ready"
@@ -1468,14 +1553,20 @@ def _finalize_training_artifacts(
     if config_path is None:
         raise FileNotFoundError(f"config.json was not found for {spec.label}.")
 
-    ready_checkpoint = ready_dir / "model.pth"
-    if spec.family == "xtts":
+    ready_model_dir = ready_dir / "fairseq" if spec.family == "mms" else ready_dir
+    ready_model_dir.mkdir(parents=True, exist_ok=True)
+    ready_checkpoint = ready_model_dir / ("G_100000.pth" if spec.family == "mms" else "model.pth")
+    if spec.family == "mms":
+        if not base_checkpoint:
+            raise ValueError("MMS base checkpoint is needed to preserve its vocabulary and Fairseq format.")
+        _export_mms_checkpoint(checkpoint, Path(base_checkpoint), ready_checkpoint)
+    elif spec.family == "xtts":
         _optimize_xtts_checkpoint(checkpoint, ready_checkpoint)
     else:
         shutil.copy2(checkpoint, ready_checkpoint)
 
-    ready_config = ready_dir / "config.json"
-    shutil.copy2(config_path, ready_config)
+    ready_config = ready_model_dir / "config.json"
+    shutil.copy2(Path(base_checkpoint).parent / "config.json" if spec.family == "mms" else config_path, ready_config)
 
     artifacts: dict[str, Any] = {
         "model_key": spec.key,
@@ -1493,6 +1584,11 @@ def _finalize_training_artifacts(
         ready_reference = ready_dir / "reference.wav"
         shutil.copy2(reference_wav, ready_reference)
         artifacts["reference_wav"] = str(ready_reference)
+
+    if spec.family == "mms":
+        ready_vocab = ready_model_dir / "vocab.txt"
+        shutil.copy2(Path(base_checkpoint).parent / "vocab.txt", ready_vocab)
+        artifacts["vocab"] = str(ready_vocab)
 
     if spec.family == "xtts":
         vocab = _latest_matching_file(workspace_root, ["vocab.json"])
@@ -1606,11 +1702,29 @@ def train_model(
     sample_text: str = "",
 ) -> dict[str, Any]:
     spec = get_model_spec(model_key)
-    language = normalize_language(language)
+    language = language.lower() if model_key == "mms_vits" else normalize_language(language)
     if spec.family == "xtts" and not pretrained_model_choices(model_key, language):
         raise ValueError(f"{spec.label} does not support language {language}.")
+    if model_key == "align_tts" and language != "en":
+        raise ValueError("Align TTS currently uses an English-only character vocabulary.")
+    if spec.family == "tts" and model_key != "align_tts":
+        coqui_phoneme_language(language)
     dataset_root = _normalize_dataset_dir(dataset_dir, output_root)
     dataset_info = load_dataset_info(str(dataset_root))
+    extra_phonemes = ""
+    if spec.family == "tts" and model_key != "align_tts":
+        recipe_source = spec.train_script_path.read_text(encoding="utf-8")
+        cleaner_match = re.search(r"text_cleaner=[\"'](\w+)[\"']", recipe_source)
+        if not cleaner_match:
+            raise ValueError(f"Could not identify the {model_key} recipe's text cleaner.")
+        cleaner_name = "multilingual_cleaners" if language != "en" else cleaner_match.group(1)
+        extra_phonemes = coqui_dataset_extra_symbols(dataset_root, language, cleaner_name)
+        if extra_phonemes and (restore_path or (use_pretrained and pretrained_model_choices(model_key, language))):
+            raise ValueError(
+                f"The {model_key} recipe would discard phoneme symbols {extra_phonemes!r} for '{language}'. "
+                "Its mapped or restored checkpoint cannot expand its vocabulary. "
+                "Turn off pretrained loading to train from scratch with these symbols."
+            )
     output_root_path = _resolve_user_path(output_root, expect_directory=True)
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     training_root = output_root_path / "training_runs" / model_key / timestamp
@@ -1621,6 +1735,7 @@ def train_model(
             raise ValueError("Select either a local Piper restore path or a pretrained checkpoint, and enable pretrained loading.")
         from utils.piper_utils import (
             ensure_monotonic_align_compiled,
+            normalize_espeak_language,
             resolve_piper_checkpoint,
             download_piper_checkpoint,
             preprocess_piper_dataset,
@@ -1666,9 +1781,11 @@ def train_model(
                 ckpt_config = json.load(f)
             sample_rate = ckpt_config.get("audio", {}).get("sample_rate", 22050)
             quality = checkpoint_info.get("quality", "medium")
-            espeak_language = checkpoint_info["locale"].lower().replace("_", "-")
+            espeak_language = ckpt_config.get("espeak", {}).get("voice") or checkpoint_info["locale"].lower().replace("_", "-")
         else:
             _notify(progress, f"Training Piper model from scratch for language: {language}...")
+
+        espeak_language = normalize_espeak_language(espeak_language)
 
         preprocessed_dir = training_root / "preprocessed"
         if not config_path:
@@ -1780,6 +1897,7 @@ def train_model(
         trusted_pretrained_restore=bool(use_pretrained and not restore_path and computed_restore_path),
         extra_overrides=extra_overrides,
         reference_wav=str(reference_wav) if reference_wav else "",
+        extra_phonemes=extra_phonemes,
     )
 
     matching_models = pretrained_model_choices(model_key, language)
@@ -1846,6 +1964,7 @@ def train_model(
         training_root=training_root,
         dataset_dir=dataset_root,
         reference_wav=str(reference_wav) if reference_wav else "",
+        base_checkpoint=computed_restore_path,
     )
     artifacts["log_path"] = str(log_path)
     artifacts["trained_steps"] = trained_steps
@@ -1938,14 +2057,30 @@ def _load_tts_runtime(artifacts: dict[str, Any], progress: ProgressCallback) -> 
         vocoder_path, vocoder_config = _download_vocoder(artifacts["default_vocoder_id"], progress)
         artifacts["vocoder_path"] = vocoder_path
         artifacts["vocoder_config"] = vocoder_config
-    runtime = TTS(
-        model_path=artifacts["checkpoint"],
-        config_path=artifacts["config"],
-        vocoder_path=vocoder_path,
-        vocoder_config_path=vocoder_config,
-        gpu=torch.cuda.is_available(),
-        progress_bar=False,
-    )
+    if artifacts["family"] == "mms":
+        import inspect
+        from TTS.utils.synthesizer import Synthesizer
+
+        runtime = TTS(progress_bar=False)
+        if "model_dir" in inspect.signature(Synthesizer).parameters:
+            runtime.synthesizer = Synthesizer(
+                model_dir=str(Path(artifacts["checkpoint"]).parent),
+                use_cuda=torch.cuda.is_available(),
+            )
+        else:
+            runtime.synthesizer = Synthesizer(
+                tts_checkpoint=artifacts["checkpoint"],
+                use_cuda=torch.cuda.is_available(),
+            )
+    else:
+        runtime = TTS(
+            model_path=artifacts["checkpoint"],
+            config_path=artifacts["config"],
+            vocoder_path=vocoder_path,
+            vocoder_config_path=vocoder_config,
+            gpu=torch.cuda.is_available(),
+            progress_bar=False,
+        )
     MODEL_CACHE[cache_key] = runtime
     return runtime
 

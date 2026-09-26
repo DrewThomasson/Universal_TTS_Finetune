@@ -142,6 +142,15 @@ MODEL_SPECS = (
         official_model_id="tts_models/en/ljspeech/vits",
     ),
     ModelSpec(
+        key="mms_vits",
+        label="MMS / Fairseq VITS",
+        recipe_dir="mms_vits",
+        train_script="train_mms_vits.py",
+        family="mms",
+        supports_language=True,
+        notes="Meta MMS checkpoints are licensed CC BY-NC 4.0.",
+    ),
+    ModelSpec(
         key="xtts_v1",
         label="XTTS v1",
         recipe_dir="xtts_v1",
@@ -174,6 +183,13 @@ MODEL_SPECS = (
 
 MODEL_SPECS_BY_KEY = {spec.key: spec for spec in MODEL_SPECS}
 
+# Meta's published MMS TTS catalog includes script and dialect variants.
+# Keep the exact codes because its download URLs use these strings verbatim.
+MMS_LANGUAGES = dict(
+    line.split("\t", 1)
+    for line in (REPO_ROOT / "assets" / "mms_languages.tsv").read_text(encoding="utf-8").splitlines()
+)
+
 # Published Coqui checkpoints whose model architecture matches an existing UFT
 # recipe. Keep the full model ID: dataset and voice variants are distinct bases.
 # English defaults remain in ModelSpec.official_model_id for older callers.
@@ -191,16 +207,18 @@ PRETRAINED_MODEL_IDS: dict[str, dict[str, tuple[str, ...]]] = {
     "tacotron2_ddc": {
         "es": ("tts_models/es/mai/tacotron2-DDC",),
         "fr": ("tts_models/fr/mai/tacotron2-DDC",),
-        "nl": ("tts_models/nl/mai/tacotron2-DDC",),
+        "nl": ("tts_models/nl/rdh/tacotron2-DDC",),
         "de": ("tts_models/de/thorsten/tacotron2-DDC",),
         "ja": ("tts_models/ja/kokoro/tacotron2-DDC",),
     },
     "vits_tts": {
+        "bn": ("tts_models/bn/custom/vits-male", "tts_models/bn/custom/vits-female"),
         "bg": ("tts_models/bg/cv/vits",),
         "cs": ("tts_models/cs/cv/vits",),
         "da": ("tts_models/da/cv/vits",),
         "et": ("tts_models/et/cv/vits",),
         "ga": ("tts_models/ga/cv/vits",),
+        "fa": ("tts_models/fa/custom/vits-female",),
         "es": ("tts_models/es/css10/vits",),
         "fr": ("tts_models/fr/css10/vits",),
         "nl": ("tts_models/nl/css10/vits",),
@@ -218,6 +236,7 @@ PRETRAINED_MODEL_IDS: dict[str, dict[str, tuple[str, ...]]] = {
         "ro": ("tts_models/ro/cv/vits",),
         "sk": ("tts_models/sk/cv/vits",),
         "sl": ("tts_models/sl/cv/vits",),
+        "sr": ("tts_models/sr/custom/vits",),
         "sv": ("tts_models/sv/cv/vits",),
         "ca": ("tts_models/ca/custom/vits",),
         "uk": ("tts_models/uk/mai/vits",),
@@ -237,6 +256,9 @@ def normalize_language(language: str) -> str:
 
 def pretrained_model_choices(model_key: str, language: str) -> tuple[str, ...]:
     spec = get_model_spec(model_key)
+    if model_key == "mms_vits":
+        language = language.lower()
+        return (f"tts_models/{language}/fairseq/vits",) if language in MMS_LANGUAGES else ()
     language = normalize_language(language)
     if spec.family == "xtts":
         return (spec.official_model_id,) if spec.official_model_id and language in XTTS_LANGUAGES[model_key] else ()
