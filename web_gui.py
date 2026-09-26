@@ -647,7 +647,7 @@ def on_model_change(selected_model):
         req = spec.requires_speaker_wav or selected_model == "styletts2"
     except Exception:
         req = False
-    return gr.update(visible=req), gr.update(visible=req) if req else gr.update(visible=False, value=None)
+    return (gr.update(visible=True), gr.update(visible=True)) if req else (gr.update(visible=False, value=None), gr.update(visible=False, value=None))
 
 
 def on_select_speaker(selected_dir, speakers_state):
