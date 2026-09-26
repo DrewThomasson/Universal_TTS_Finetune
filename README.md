@@ -1,6 +1,6 @@
 # Universal TTS Finetune
 
-Prepare voice recordings, fine-tune a TTS model, and try it in a browser. This tool runs separately from [ebook2audiobook](https://github.com/DrewThomasson/ebook2audiobook) and offers 18 training engines, including optional StyleTTS2 fine-tuning.
+Prepare voice recordings, fine-tune a TTS model, and try it in a browser. This tool runs separately from [ebook2audiobook](https://github.com/DrewThomasson/ebook2audiobook) and offers 19 training engines, including optional StyleTTS2 and OmniVoice fine-tuning.
 
 ![Universal TTS Finetune web GUI showing dataset preparation](assets/web_gui.png)
 
@@ -54,6 +54,21 @@ This adapter reuses the prepared UFT dataset and runs the official training code
 - **StyleTTS2:** English only and requires CUDA for fine-tuning. Clone the [official source](https://github.com/yl4579/StyleTTS2), install its requirements in a separate compatible Python environment, and obtain its [LibriTTS base checkpoint and required ASR/JDC/PL-BERT assets](https://github.com/yl4579/StyleTTS2#pre-trained-models). Set `UFT_STYLETTS2_REPO` to that checkout, `UFT_STYLETTS2_CHECKPOINT` to the local LibriTTS `.pth`, and `UFT_STYLETTS2_PYTHON` to the interpreter with the official dependencies if different from UFT's. The adapter keeps generated data in the UFT output folder and never downloads these assets for you.
 
 The adapter records its checkpoint in `ready/artifacts.json`. For inference, select the run in UFT, upload a speaker reference WAV, and use the local official-requirements Python environment when needed by setting `UFT_STYLETTS2_PYTHON`. The checkout path can be set with `UFT_STYLETTS2_REPO`. Inference defaults to CPU; opt into CUDA with `UFT_STYLETTS2_INFER_DEVICE=cuda`. It uses local assets only and does not download weights or dependencies. E2A upload ZIP is unavailable for this format.
+
+### OmniVoice (optional)
+
+OmniVoice LoRA fine-tuning and inference use a separate environment because its Transformers dependencies can conflict with UFT's Coqui stack. Set `UFT_OMNIVOICE_PYTHON` to that environment's Python executable and install the official `k2-fsa/OmniVoice` requirements plus `peft>=0.20`. Keep its official base model, audio tokenizer, and Qwen3-0.6B assets cached locally before starting; UFT runs offline and does not fetch models or dependencies. The trainer uses batch size 1 and gradient accumulation 1. It writes the selected published `language_id` into every training manifest.
+
+Completed runs store their LoRA checkpoint, base model, and isolated interpreter in `ready/artifacts.json`. UFT inference loads the adapter through OmniVoice's official LoRA API in that same environment. The language picker contains the IDs from OmniVoice's published catalog; catalog presence represents published coverage, not language-by-language UFT validation. Scratch training, resume from a local checkpoint, and E2A export are unsupported for this adapter.
+
+Use Linux with at least 16 GiB total and 12 GiB free GPU memory for this guarded profile. The base Docker image does not include OmniVoice's optional environment. For example, install a CUDA-compatible PyTorch build in a separate environment, then:
+
+```bash
+/path/to/omni-env/bin/python -m pip install omnivoice==0.2.1 'peft>=0.20'
+export UFT_OMNIVOICE_PYTHON=/path/to/omni-env/bin/python
+```
+
+Cache `k2-fsa/OmniVoice`, `eustlb/higgs-audio-v2-tokenizer`, and `Qwen/Qwen3-0.6B` in the same Hugging Face cache used by UFT (`UFT_MODELS_DIR`) before training. Keep that cache available for inference; the packaged LoRA adapter needs its base model.
 
 For an E2A custom voice, load the finished run in **Inference** and click **Create E2A upload ZIP**. This supports XTTS v1/v2, VITS, MMS/Fairseq VITS, and Piper, and packages the exact filenames E2A requires. Other UFT engines are not accepted by E2A's custom model upload. You can also run `python headless_cli.py export-e2a --artifacts /path/to/ready/artifacts.json --output-file /path/to/voice.zip`.
 

@@ -156,6 +156,36 @@ class InferenceDispatchTests(unittest.TestCase):
             self.assertEqual(adapter_call.call_args.kwargs["reference_wav"], "reference.wav")
             self.assertEqual(result["model_key"], "styletts2")
 
+    def test_omnivoice_routes_to_isolated_optional_inference(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifacts = {"family": "omnivoice", "model_key": "omnivoice", "language": "en", "artifacts_file": str(root / "artifacts.json")}
+            route = Mock(return_value=root / "out.wav")
+            adapter = _module("utils.omnivoice_infer", synthesize_omnivoice=route)
+            with patch.object(pipeline, "load_artifacts", return_value=artifacts), \
+                 patch.dict(sys.modules, {"utils.omnivoice_infer": adapter}):
+                result = pipeline.synthesize(
+                    artifacts_path_or_dir=str(root), text="sample", output_file=str(root / "out.wav"),
+                )
+            route.assert_called_once()
+            self.assertEqual(route.call_args.args[0], artifacts)
+            self.assertEqual(route.call_args.args[2], "en")
+            self.assertEqual(result["model_key"], "omnivoice")
+
+    def test_omnivoice_published_language_catalog_and_invalid_language_rejection(self):
+        from utils.model_registry import OMNIVOICE_LANGUAGES, pretrained_model_choices
+        self.assertEqual(len(OMNIVOICE_LANGUAGES), 646)
+        self.assertTrue(pretrained_model_choices("omnivoice", "en"))
+        self.assertFalse(pretrained_model_choices("omnivoice", "not-a-language"))
+        self.assertEqual(len(web_gui.OMNIVOICE_LANGUAGE_CHOICES), 646)
+
+    def test_omnivoice_invalid_training_language_rejected_before_dataset_access(self):
+        with self.assertRaisesRegex(ValueError, "no supported starting checkpoint"):
+            pipeline.train_model(
+                model_key="omnivoice", output_root="unused", dataset_dir="unused",
+                language="not-a-language", batch_size=1, grad_accum=1,
+            )
+
     def test_styletts2_official_worker_source_is_syntactically_valid(self):
         compile(_WORKER, "styletts2_inference_worker.py", "exec")
 
@@ -169,7 +199,7 @@ class InferenceDispatchTests(unittest.TestCase):
             ("tacotron2_ddc", "tts"), ("vits_tts", "tts"), ("mms_vits", "mms"),
             ("xtts_v1", "xtts"), ("xtts_v2", "xtts"), ("piper", "piper"),
         ]}
-        self.assertEqual(gui_keys, expected_keys | {"styletts2"})
+        self.assertEqual(gui_keys, expected_keys | {"styletts2", "omnivoice"})
 
     def test_gui_run_inference_delegates_once_to_pipeline(self):
         with tempfile.TemporaryDirectory() as temp_dir:
