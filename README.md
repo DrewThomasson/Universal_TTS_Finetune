@@ -74,6 +74,8 @@ Use the pinned official source revision above: the PyPI `0.2.1` wheel lacks the 
 
 For an E2A custom voice, load the finished run in **Inference** and click **Create E2A upload ZIP**. This supports XTTS v1/v2, VITS, MMS/Fairseq VITS, and Piper, and packages the exact filenames E2A requires. Other UFT engines are not accepted by E2A's custom model upload. You can also run `python headless_cli.py export-e2a --artifacts /path/to/ready/artifacts.json --output-file /path/to/voice.zip`.
 
+See [engine verification](ENGINE_VERIFICATION.md) for the current test record and the checklist for adding engines.
+
 ## Command line
 
 The same local environment also provides `headless_cli.py`. For example, with short Spanish WAV clips and a CSV whose columns are `audio,text`:
