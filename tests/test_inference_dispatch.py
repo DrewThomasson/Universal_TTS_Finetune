@@ -179,6 +179,12 @@ class InferenceDispatchTests(unittest.TestCase):
         self.assertFalse(pretrained_model_choices("omnivoice", "not-a-language"))
         self.assertEqual(len(web_gui.OMNIVOICE_LANGUAGE_CHOICES), 646)
 
+    def test_omnivoice_rejects_reference_wav_instead_of_silently_ignoring_it(self):
+        artifacts = {"family": "omnivoice", "language": "es"}
+        with tempfile.TemporaryDirectory() as folder, patch.object(pipeline, "load_artifacts", return_value=artifacts):
+            with self.assertRaisesRegex(ValueError, "reference voice cloning"):
+                pipeline.synthesize(artifacts_path_or_dir=folder, text="Hello", output_file=str(Path(folder) / "out.wav"), speaker_wav="reference.wav")
+
     def test_omnivoice_invalid_training_language_rejected_before_dataset_access(self):
         with self.assertRaisesRegex(ValueError, "no supported starting checkpoint"):
             pipeline.train_model(

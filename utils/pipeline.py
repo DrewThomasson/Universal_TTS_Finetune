@@ -2209,8 +2209,6 @@ def synthesize(
     if not text.strip():
         raise ValueError("Text is required for synthesis.")
     artifacts = load_artifacts(artifacts_path_or_dir, model_key=model_key)
-    if artifacts.get("family") == "omnivoice" and language == "en":
-        language = artifacts.get("language", language)
     output_path = _resolve_user_path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     speaker_reference = speaker_wav or artifacts.get("reference_wav")
@@ -2226,6 +2224,8 @@ def synthesize(
         )
     elif artifacts.get("family") == "omnivoice":
         from utils.omnivoice_infer import synthesize_omnivoice
+        if speaker_reference:
+            raise ValueError("OmniVoice reference voice cloning is not exposed by this LoRA adapter; omit the speaker WAV.")
         language = language or artifacts.get("language", "en")
         if not pretrained_model_choices("omnivoice", language):
             raise ValueError(f"OmniVoice has no published checkpoint for language {language}.")
