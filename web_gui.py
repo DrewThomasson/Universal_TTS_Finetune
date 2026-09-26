@@ -48,7 +48,7 @@ from utils.pipeline import (
     pause_training,
     resume_training,
 )
-from utils.model_registry import MMS_LANGUAGES, pretrained_model_choices
+from utils.model_registry import MMS_LANGUAGES, XTTS_LANGUAGES, pretrained_model_choices
 from utils.asr import MMS_ASR_LANGUAGES
 from utils.e2a_export import export_e2a_zip
 
@@ -80,6 +80,10 @@ PIPER_LANGUAGE_CHOICES = sorted(set(LANGUAGE_CHOICES) | {
     "bn", "he", "id", "ku", "ml", "mr", "te", "th",
 })
 VITS_LANGUAGE_CHOICES = sorted(set(LANGUAGE_CHOICES) | {"bn"})
+XTTS_LANGUAGE_CHOICES = {
+    key: [language for language in LANGUAGE_CHOICES if language in supported]
+    for key, supported in XTTS_LANGUAGES.items()
+}
 WHISPER_CHOICES = ["large-v3", "large-v2", "large", "distil-large-v3", "distil-large-v2", "medium", "medium.en", "small", "small.en", "base", "base.en", "tiny", "tiny.en"]
 MODEL_CHOICES = [(label, key) for key, label in dropdown_choices()]
 MMS_LANGUAGE_CHOICES = [(f"{name} ({code})", code) for code, name in MMS_LANGUAGES.items()]
@@ -90,6 +94,8 @@ DATASET_LANGUAGE_CHOICES = LANGUAGE_CHOICES + [
 
 
 def update_finetune_language_choices(model_key):
+    if model_key in XTTS_LANGUAGE_CHOICES:
+        return gr.update(choices=XTTS_LANGUAGE_CHOICES[model_key], value="en")
     if model_key == "mms_vits":
         return gr.update(choices=MMS_LANGUAGE_CHOICES, value="eng")
     if model_key == "piper":
@@ -688,14 +694,15 @@ def update_training_options(model_key, language, use_pretrained, pretrained_mode
             checkpoint_info = resolve_piper_checkpoint(language, checkpoint_id=selected_id)
         except (LookupError, ValueError) as exc:
             return (
-                f"🟡 **Piper TTS** has no matching training checkpoint for `{language}`: {exc}. Training from scratch remains available.",
+                f"🟡 **Piper TTS** has no matching training checkpoint for `{language}`: {exc}. "
+                "Training from scratch remains available, but usually needs hours of audio and much longer training for intelligible speech.",
                 gr.update(value=False, interactive=False),
             )
         msg = f"🟢 **Piper TTS** has a `{language}` training checkpoint: `{checkpoint_info['id']}`.\n\n"
         if use_pretrained:
             msg += "Fine-tuning will download and load this checkpoint."
         else:
-            msg += "Training will start from scratch."
+            msg += "Training will start from scratch. A larger dataset (hours of audio) and much longer training are usually needed for intelligible speech."
         return msg, gr.update(interactive=True)
 
     # 3. MMS checkpoints use a published language-specific generator and vocab.
@@ -914,7 +921,7 @@ if __name__ == "__main__":
                 allow_custom_value=True,
                 interactive=True,
             )
-            train_language = gr.Dropdown(label="Fine-tuning language", choices=LANGUAGE_CHOICES, value="en", info="Choose your dataset language; available base checkpoints update automatically. MMS uses its published three-letter language codes.")
+            train_language = gr.Dropdown(label="Fine-tuning language", choices=XTTS_LANGUAGE_CHOICES["xtts_v2"], value="en", info="Choose your dataset language; available base checkpoints update automatically. MMS uses its published three-letter language codes.")
             with gr.Row():
                 restore_model_dropdown = gr.Dropdown(
                     label="Resume from previous training run",
@@ -980,7 +987,7 @@ if __name__ == "__main__":
                 type="filepath",
                 sources=["upload"],
             )
-            infer_language = gr.Dropdown(label="Inference language", choices=LANGUAGE_CHOICES, value="en")
+            infer_language = gr.Dropdown(label="Inference language", choices=XTTS_LANGUAGE_CHOICES["xtts_v2"], value="en")
             tts_text = gr.Textbox(label="Input text", value="This fine-tuned model is ready to test.")
             infer_status = gr.Textbox(label="Status", interactive=False)
             generated_audio = gr.Audio(label="Generated audio")
@@ -1279,6 +1286,11 @@ if __name__ == "__main__":
             fn=on_model_change,
             inputs=[infer_model_key],
             outputs=[speaker_reference_audio, used_reference_audio],
+        )
+        infer_model_key.change(
+            fn=update_finetune_language_choices,
+            inputs=[infer_model_key],
+            outputs=[infer_language],
         )
         infer_model_key.change(
             fn=update_trained_models,
