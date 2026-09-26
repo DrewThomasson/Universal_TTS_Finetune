@@ -1,6 +1,6 @@
 # Universal TTS Finetune
 
-Prepare voice recordings, fine-tune a TTS model, and try it in a browser. This tool runs separately from [ebook2audiobook](https://github.com/DrewThomasson/ebook2audiobook) and supports 16 Coqui and Piper training engines.
+Prepare voice recordings, fine-tune a TTS model, and try it in a browser. This tool runs separately from [ebook2audiobook](https://github.com/DrewThomasson/ebook2audiobook) and supports 17 Coqui, MMS/Fairseq, and Piper training engines.
 
 ![Universal TTS Finetune web GUI showing dataset preparation](assets/web_gui.png)
 
@@ -32,8 +32,10 @@ On Windows, activate with `.venv\Scripts\activate` instead. Open **http://localh
 
 ## Fine-tune in three steps
 
-1. **Prepare dataset:** Add audio clips and, if you have them, matching transcripts. You can also supply an E2A audiobook with its matching `.vtt` file. Without transcripts, the app uses Whisper. Select the dataset language and create the dataset.
-2. **Train model:** Select the dataset, engine, and fine-tuning language. Choose a published **starting checkpoint** when one is available, then start training. Piper choices show language, locale, voice, and quality. A ready-to-speak Piper ONNX voice is different from a training checkpoint; UFT does not silently substitute an English checkpoint.
+1. **Prepare dataset:** Add audio clips and, if you have them, matching transcripts. You can also supply an E2A audiobook with its matching `.vtt` file. Select the dataset language and create the dataset. Without transcripts, `auto` uses Whisper for short language codes (such as `en`) and MMS ASR for published MMS codes (such as `eng`). You can choose either backend explicitly. Exact transcript maps and alignment files bypass ASR. MMS ASR needs a [published adapter](https://huggingface.co/facebook/mms-1b-all) for the selected language; its model is licensed CC BY-NC 4.0.
+2. **Train model:** Select the dataset, engine, and fine-tuning language. Choose a published **starting checkpoint** when one is available, then start training. XTTS v1/v2 list only their supported languages (14/17); selecting another engine may require training from scratch if no checkpoint is mapped. Piper choices show language, locale, voice, and quality. A ready-to-speak Piper ONNX voice is different from a training checkpoint; UFT does not silently substitute an English checkpoint. MMS/Fairseq VITS uses Meta's published three-letter language codes and requires its matching checkpoint. Those checkpoints carry a CC BY-NC 4.0 license.
+
+The training language list follows each engine: Coqui phoneme models show languages supported by the installed phonemizer, Align TTS currently uses English only, and Piper stops with an error if its selected eSpeak voice is unavailable. For Coqui scratch runs, UFT includes the dataset's phoneme symbols in the model vocabulary; a mapped checkpoint cannot expand its fixed vocabulary and UFT reports an error if the dataset needs extra symbols. A language without a starting checkpoint needs substantially more data and training time.
 3. **Inference:** Select the finished run and generate a short sample. XTTS also needs a speaker reference WAV.
 
 <details>
@@ -45,7 +47,7 @@ On Windows, activate with `.venv\Scripts\activate` instead. Open **http://localh
 
 The app stores prepared data under `<output_root>/dataset/` and finished models under `<output_root>/training_runs/<model>/<run>/ready/`. Keep `artifacts.json` with the model files so UFT can load the run later.
 
-For an XTTSv2 model you want to use in E2A, follow E2A's [custom model ZIP instructions](https://github.com/DrewThomasson/ebook2audiobook#example-of-custom-model-zip-upload). The XTTSv2 `ready/` folder contains the trained model, config, vocabulary, and reference audio needed for that package; E2A expects the reference audio named `ref.wav`.
+For an E2A custom voice, load the finished run in **Inference** and click **Create E2A upload ZIP**. This supports XTTS v1/v2, VITS, MMS/Fairseq VITS, and Piper, and packages the exact filenames E2A requires. Other UFT engines are not accepted by E2A's custom model upload. You can also run `python headless_cli.py export-e2a --artifacts /path/to/ready/artifacts.json --output-file /path/to/voice.zip`.
 
 ## Command line
 
@@ -67,3 +69,5 @@ python headless_cli.py train \
 ```
 
 The checkpoint list includes only mapped starting models for that engine and language. Use `--pretrained-model-id` to select one explicitly, or omit it for the default. `python headless_cli.py --help` lists the other commands; each command also has `--help`.
+
+For the E2A FAIRSEQ engine, choose **MMS / Fairseq VITS** in the GUI and select the matching language from [Meta's MMS catalog](https://dl.fbaipublicfiles.com/mms/tts/all-tts-languages.html). The CLI uses the published code, for example `--model mms_vits --language eng`. The finished run's `ready/fairseq/` folder contains `G_100000.pth`, `config.json`, and `vocab.txt` in the published MMS checkpoint layout.
