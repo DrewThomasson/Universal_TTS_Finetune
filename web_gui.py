@@ -108,6 +108,8 @@ def _phonemizer_language_choices(choices):
 
 
 def update_finetune_language_choices(model_key):
+    if model_key == "f5_tts":
+        return gr.update(choices=["en", "zh-cn"], value="en")
     if model_key == "styletts2":
         return gr.update(choices=["en"], value="en")
     if model_key == "omnivoice":
@@ -250,7 +252,7 @@ def list_trained_models(output_root: str | None, model_key: str | None) -> list[
 
 
 def get_adaptive_defaults(model_key: str, dataset_dir: gr.Dropdown | str | None) -> tuple[int, int]:
-    if model_key == "omnivoice":
+    if model_key in {"omnivoice", "f5_tts"}:
         return 10, 1
     if model_key == "styletts2":
         return 10, 2
@@ -317,7 +319,7 @@ def update_trained_models(out_root: str | None, model_key: str | None) -> gr.Dro
 
 
 def update_resume_models(out_root: str | None, model_key: str | None) -> gr.Dropdown:
-    if model_key in {"styletts2", "omnivoice"}:
+    if model_key in {"styletts2", "omnivoice", "f5_tts"}:
         return gr.update(choices=[("None", "")], value="", interactive=False)
     choices = [("None", "")] + list_trained_models(out_root, model_key)
     return gr.update(choices=choices, value="", interactive=True)
@@ -645,7 +647,7 @@ def on_model_change(selected_model):
         req = spec.requires_speaker_wav or selected_model == "styletts2"
     except Exception:
         req = False
-    return gr.update(visible=req), gr.update(visible=req)
+    return gr.update(visible=req), gr.update(visible=req) if req else gr.update(visible=False, value=None)
 
 
 def on_select_speaker(selected_dir, speakers_state):
@@ -701,6 +703,16 @@ def update_training_options(model_key, language, use_pretrained, pretrained_mode
         family = spec.family
     except Exception as exc:
         return f"Error loading model spec: {exc}", gr.update()
+
+    if family == "f5_tts":
+        if not choices:
+            return f"F5-TTS v1 does not support `{language}`; select en or zh-cn.", gr.update(value=True, interactive=False)
+        return (
+            "**F5-TTS v1:** English and Chinese only. Set `UFT_F5TTS_PYTHON` to a separate F5-TTS environment. "
+            "The official base checkpoint downloads on first training; CUDA is required. Start with batch size 1 and short clips. "
+            "Inference uses the packaged reference audio and transcript. E2A export is unavailable.",
+            gr.update(value=True, interactive=False),
+        )
 
     if family == "styletts2":
         if language != "en":
@@ -1319,9 +1331,9 @@ if __name__ == "__main__":
         )
         model_key.change(
             fn=lambda model: gr.update(
-                label="Local StyleTTS2 base checkpoint" if model == "styletts2" else "Restore path unavailable for OmniVoice" if model == "omnivoice" else "Optional checkpoint to continue from",
+                label="Local StyleTTS2 base checkpoint" if model == "styletts2" else "Restore path unavailable" if model in {"omnivoice", "f5_tts"} else "Optional checkpoint to continue from",
                 value="",
-                interactive=model != "omnivoice",
+                interactive=model not in {"omnivoice", "f5_tts"},
             ),
             inputs=[model_key],
             outputs=[restore_path],
