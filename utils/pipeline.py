@@ -1702,13 +1702,17 @@ def train_model(
     sample_text: str = "",
 ) -> dict[str, Any]:
     spec = get_model_spec(model_key)
-    language = language.lower() if model_key == "mms_vits" else normalize_language(language)
+    language = language.lower().replace("_", "-") if model_key in {"mms_vits", "omnivoice"} else normalize_language(language)
     if spec.family == "xtts" and not pretrained_model_choices(model_key, language):
         raise ValueError(f"{spec.label} does not support language {language}.")
     if spec.family == "mms" and not pretrained_model_choices(model_key, language):
         raise ValueError(f"{spec.label} has no published checkpoint for language {language}.")
+    if spec.family in {"styletts2", "omnivoice"} and not pretrained_model_choices(model_key, language):
+        raise ValueError(f"{spec.label} has no supported starting checkpoint for language {language}.")
     if spec.family in {"xtts", "mms"} and not use_pretrained and not restore_path:
         raise ValueError(f"{spec.label} requires a starting checkpoint; --no-pretrained needs --restore-path.")
+    if spec.family in {"styletts2", "omnivoice"} and not use_pretrained:
+        raise ValueError(f"{spec.label} requires pretrained loading; training from scratch is not supported by this UFT adapter.")
     if model_key == "align_tts" and language != "en":
         raise ValueError("Align TTS currently uses an English-only character vocabulary.")
     if spec.family == "tts" and model_key != "align_tts":
@@ -1739,6 +1743,116 @@ def train_model(
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     training_root = output_root_path / "training_runs" / model_key / timestamp
     training_root.mkdir(parents=True, exist_ok=True)
+
+    if spec.family in {"styletts2", "omnivoice"}:
+        if grad_accum != 1:
+            raise ValueError(f"{spec.label} currently requires gradient accumulation 1 in UFT.")
+        if batch_size != 1:
+            raise ValueError(f"{spec.label} currently requires batch size 1 in UFT.")
+        if sample_epoch_interval:
+            raise ValueError(f"{spec.label} does not support periodic audio samples during training.")
+        if pretrained_model_id and pretrained_model_id not in pretrained_model_choices(model_key, language):
+            raise ValueError(f"{pretrained_model_id} is not a mapped {language} checkpoint for {spec.label}.")
+        overrides = json.loads(extra_overrides_json) if extra_overrides_json else {}
+        if not isinstance(overrides, dict):
+            raise ValueError("extra_overrides_json must be a JSON object.")
+        if spec.family == "styletts2":
+            allowed = {"styletts2_repo", "styletts2_python"}
+            unknown = set(overrides) - allowed
+            if unknown:
+                raise ValueError(f"Unknown StyleTTS2 option(s): {', '.join(sorted(unknown))}.")
+            from utils.styletts2_utils import train_styletts2
+            repo = overrides.get("styletts2_repo") or os.environ.get("UFT_STYLETTS2_REPO")
+            checkpoint = restore_path or os.environ.get("UFT_STYLETTS2_CHECKPOINT")
+            if not repo or not checkpoint:
+                raise ValueError(
+                    "StyleTTS2 needs the official source checkout and LibriTTS base checkpoint. "
+                    "Set UFT_STYLETTS2_REPO and UFT_STYLETTS2_CHECKPOINT, or set styletts2_repo "
+                    "in config overrides and use the local restore checkpoint field."
+                )
+            return train_styletts2(
+                dataset_dir=dataset_root,
+                training_root=training_root,
+                styletts2_repo=repo,
+                pretrained_checkpoint=checkpoint,
+                language=language,
+                epochs=epochs,
+                batch_size=batch_size,
+                python_executable=overrides.get("styletts2_python") or os.environ.get("UFT_STYLETTS2_PYTHON") or sys.executable,
+                stream_logs=stream_logs,
+                progress=progress,
+                dry_run=dry_run,
+            )
+
+        allowed = {"omnivoice_audio_tokenizer"}
+        unknown = set(overrides) - allowed
+        if unknown:
+            raise ValueError(f"Unknown OmniVoice option(s): {', '.join(sorted(unknown))}.")
+        if restore_path:
+            raise ValueError("OmniVoice resume and local base-model overrides are not supported by this UFT adapter; clear the restore path and use the cached official base model.")
+        train_manifest = training_root / "omnivoice_train.jsonl"
+        eval_manifest = training_root / "omnivoice_eval.jsonl"
+        clip_counts = {}
+        for split, destination in (("train", train_manifest), ("val", eval_manifest)):
+            rows = []
+            metadata = dataset_root / f"metadata_{split}.csv"
+            for line in metadata.read_text(encoding="utf-8").splitlines():
+                fields = line.split("|", 2)
+                if len(fields) != 3 or not fields[0].strip() or not fields[2].strip():
+                    continue
+                clip_id, _, transcript = fields
+                audio_path = dataset_root / "wavs" / f"{clip_id}.wav"
+                if not audio_path.is_file():
+                    raise FileNotFoundError(f"OmniVoice dataset clip not found: {audio_path}")
+                rows.append({"id": clip_id, "audio_path": str(audio_path), "text": transcript.strip(), "language_id": language})
+            if not rows:
+                raise ValueError(f"OmniVoice needs at least one {split} clip in {metadata}.")
+            destination.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+            clip_counts[split] = len(rows)
+        steps = max(1, epochs * clip_counts["train"])
+        if dry_run:
+            return {
+                "model_key": model_key,
+                "family": spec.family,
+                "training_root": str(training_root),
+                "dataset_dir": str(dataset_root),
+                "train_manifest": str(train_manifest),
+                "eval_manifest": str(eval_manifest),
+                "planned_steps": steps,
+                "status": "dry-run",
+            }
+        from utils.omnivoice_utils import run_omnivoice_finetune
+        checkpoint_dir = run_omnivoice_finetune(
+            train_manifest,
+            training_root,
+            dev_jsonl=eval_manifest,
+            base_model=spec.official_model_id,
+            audio_tokenizer=overrides.get("omnivoice_audio_tokenizer") or "eustlb/higgs-audio-v2-tokenizer",
+            steps=steps,
+            save_steps=steps,
+            batch_tokens=512,
+            progress_callback=progress,
+        )
+        checkpoints = sorted(checkpoint_dir.glob("checkpoint-*"), key=lambda path: path.stat().st_mtime)
+        if not checkpoints:
+            raise FileNotFoundError(f"OmniVoice finished without a checkpoint under {checkpoint_dir}.")
+        ready_dir = training_root / "ready"
+        ready_dir.mkdir(parents=True, exist_ok=True)
+        artifacts = {
+            "model_key": model_key,
+            "model_label": spec.label,
+            "family": spec.family,
+            "training_root": str(training_root),
+            "dataset_dir": str(dataset_root),
+            "checkpoint": str(checkpoints[-1]),
+            "config": str(training_root / "omnivoice_work" / "config" / "train.json"),
+            "pretrained_model_id": spec.official_model_id,
+            "trained_steps": steps,
+            "inference_note": "Load the LoRA adapter with the official OmniVoice runtime; UFT inference is not available for this engine.",
+        }
+        (ready_dir / "artifacts.json").write_text(json.dumps(artifacts, indent=2), encoding="utf-8")
+        artifacts["artifacts_file"] = str(ready_dir / "artifacts.json")
+        return artifacts
 
     if model_key == "piper":
         if pretrained_model_id and (restore_path or not use_pretrained):
@@ -2112,6 +2226,8 @@ def synthesize(
     if not text.strip():
         raise ValueError("Text is required for synthesis.")
     artifacts = load_artifacts(artifacts_path_or_dir, model_key=model_key)
+    if artifacts.get("family") in {"styletts2", "omnivoice"}:
+        raise ValueError(f"UFT does not provide built-in inference for {artifacts['family']}; use the official runtime for this checkpoint.")
     output_path = _resolve_user_path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     speaker_reference = speaker_wav or artifacts.get("reference_wav")
@@ -2169,8 +2285,8 @@ def list_supported_models() -> list[dict[str, Any]]:
     return [
         {
             **asdict(spec),
-            "recipe_path": str(spec.recipe_path),
-            "train_script_path": str(spec.train_script_path),
+            "recipe_path": str(spec.recipe_path) if spec.recipe_dir else None,
+            "train_script_path": str(spec.train_script_path) if spec.train_script else None,
         }
         for spec in MODEL_SPECS
     ]

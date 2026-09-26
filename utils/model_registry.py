@@ -179,6 +179,26 @@ MODEL_SPECS = (
         supports_language=True,
         requires_speaker_wav=False,
     ),
+    ModelSpec(
+        key="styletts2",
+        label="StyleTTS2 (English)",
+        recipe_dir="",
+        train_script="",
+        family="styletts2",
+        official_model_id="yl4579/StyleTTS2-LibriTTS",
+        supports_language=True,
+        notes="Requires the official StyleTTS2 source and local LibriTTS checkpoint.",
+    ),
+    ModelSpec(
+        key="omnivoice",
+        label="OmniVoice (LoRA)",
+        recipe_dir="",
+        train_script="",
+        family="omnivoice",
+        official_model_id="k2-fsa/OmniVoice",
+        supports_language=True,
+        notes="Requires optional OmniVoice dependencies, cached weights, and at least 16 GiB VRAM in the guarded profile.",
+    ),
 )
 
 MODEL_SPECS_BY_KEY = {spec.key: spec for spec in MODEL_SPECS}
@@ -188,6 +208,14 @@ MODEL_SPECS_BY_KEY = {spec.key: spec for spec in MODEL_SPECS}
 MMS_LANGUAGES = dict(
     line.split("\t", 1)
     for line in (REPO_ROOT / "assets" / "mms_languages.tsv").read_text(encoding="utf-8").splitlines()
+)
+
+# Exact OmniVoice language IDs from k2-fsa/OmniVoice's official
+# docs/lang_id_name_map.tsv. These are not interchangeable with MMS IDs.
+OMNIVOICE_LANGUAGES = dict(
+    (fields[0], fields[1])
+    for line in (REPO_ROOT / "assets" / "omnivoice_languages.tsv").read_text(encoding="utf-8").splitlines()[1:]
+    if len(fields := line.split("\t")) >= 2
 )
 
 # Published Coqui checkpoints whose model architecture matches an existing UFT
@@ -259,7 +287,12 @@ def pretrained_model_choices(model_key: str, language: str) -> tuple[str, ...]:
     if model_key == "mms_vits":
         language = language.lower()
         return (f"tts_models/{language}/fairseq/vits",) if language in MMS_LANGUAGES else ()
+    if model_key == "omnivoice":
+        language = language.lower().replace("_", "-")
+        return (spec.official_model_id,) if language in OMNIVOICE_LANGUAGES else ()
     language = normalize_language(language)
+    if model_key == "styletts2":
+        return (spec.official_model_id,) if language == "en" else ()
     if spec.family == "xtts":
         return (spec.official_model_id,) if spec.official_model_id and language in XTTS_LANGUAGES[model_key] else ()
     if language == "en":
