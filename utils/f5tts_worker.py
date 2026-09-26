@@ -35,7 +35,8 @@ def train(config):
         duration = len(audio) / rate
         if not 0.3 <= duration <= min(30, config['max_audio_seconds']):
             continue
-        text = convert_char_to_pinyin([row[2] if len(row) > 2 else row[1]])[0]
+        original_text = row[2] if len(row) > 2 else row[1]
+        text = convert_char_to_pinyin([original_text])[0]
         unknown = set(text) - set(mapping)
         if unknown:
             raise ValueError(f'F5-TTS base vocabulary cannot encode {unknown!r} in {source.name}.')
@@ -45,7 +46,7 @@ def train(config):
         if rate != 24000:
             tensor = torchaudio.functional.resample(tensor, rate, 24000)
         sf.write(destination, tensor.squeeze(0).numpy(), 24000)
-        rows.append(dict(audio_path=str(destination), text=text, duration=duration))
+        rows.append(dict(audio_path=str(destination), text=text, reference_text=original_text, duration=duration))
     updates = math.ceil(math.ceil(len(rows) / config['batch_size']) / config['grad_accum']) * config['epochs']
     if updates < 2:
         raise ValueError('F5-TTS needs at least two optimizer updates for its warmup/decay schedule.')
@@ -79,7 +80,7 @@ def train(config):
     reference = rows[0]
     shutil.copy2(reference['audio_path'], ready / 'reference.wav')
     artifacts = dict(config, model_key='f5_tts', model_label='F5-TTS v1', family='f5_tts', checkpoint=str(ready / 'model.pt'),
-                     vocab=str(vocab), reference_wav=str(ready / 'reference.wav'), reference_text=''.join(reference['text']),
+                     vocab=str(vocab), reference_wav=str(ready / 'reference.wav'), reference_text=reference['reference_text'],
                      trained_steps=completed, pretrained_model_id='SWivid/F5-TTS/F5TTS_v1_Base', use_ema=False)
     (ready / 'artifacts.json').write_text(json.dumps(artifacts, indent=2), encoding='utf-8')
     print(f'UFT_F5_COMPLETED_UPDATES={completed}', flush=True)
