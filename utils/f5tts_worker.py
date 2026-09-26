@@ -79,7 +79,9 @@ def train(config):
     torch.save({'model_state_dict': checkpoint['model_state_dict']}, ready / 'model.pt')
     reference = rows[0]
     shutil.copy2(reference['audio_path'], ready / 'reference.wav')
-    artifacts = dict(config, model_key='f5_tts', model_label='F5-TTS v1', family='f5_tts', checkpoint=str(ready / 'model.pt'),
+    config_file = ready / 'config.json'
+    config_file.write_text(json.dumps(dict(config, model='F5TTS_v1_Base', train_clips=len(rows), use_ema=False), indent=2), encoding='utf-8')
+    artifacts = dict(config, config=str(config_file), model_key='f5_tts', model_label='F5-TTS v1', family='f5_tts', checkpoint=str(ready / 'model.pt'),
                      vocab=str(vocab), reference_wav=str(ready / 'reference.wav'), reference_text=reference['reference_text'],
                      trained_steps=completed, pretrained_model_id='SWivid/F5-TTS/F5TTS_v1_Base', use_ema=False)
     (ready / 'artifacts.json').write_text(json.dumps(artifacts, indent=2), encoding='utf-8')
