@@ -48,7 +48,7 @@ from utils.pipeline import (
     pause_training,
     resume_training,
 )
-from utils.model_registry import pretrained_model_choices
+from utils.model_registry import MMS_LANGUAGES, pretrained_model_choices
 
 LANGUAGE_CHOICES = [
     "en",
@@ -74,6 +74,13 @@ LANGUAGE_CHOICES = [
 ]
 WHISPER_CHOICES = ["large-v3", "large-v2", "large", "distil-large-v3", "distil-large-v2", "medium", "medium.en", "small", "small.en", "base", "base.en", "tiny", "tiny.en"]
 MODEL_CHOICES = [(label, key) for key, label in dropdown_choices()]
+MMS_LANGUAGE_CHOICES = [(f"{name} ({code})", code) for code, name in MMS_LANGUAGES.items()]
+
+
+def update_finetune_language_choices(model_key):
+    if model_key == "mms_vits":
+        return gr.update(choices=MMS_LANGUAGE_CHOICES, value="eng")
+    return gr.update(choices=LANGUAGE_CHOICES, value="en")
 
 
 class PreprocessProgressTracker:
@@ -660,7 +667,17 @@ def update_training_options(model_key, language, use_pretrained, pretrained_mode
             msg += "Training will start from scratch."
         return msg, gr.update(interactive=True)
 
-    # 3. Single-language models
+    # 3. MMS checkpoints use a published language-specific generator and vocab.
+    elif family == "mms":
+        if not official_model_id:
+            return f"❌ **{model_label}** has no published checkpoint for `{language}`.", gr.update(value=False, interactive=False)
+        return (
+            f"🟢 **{model_label}** uses `{official_model_id}`. Meta publishes these checkpoints under CC BY-NC 4.0. "
+            "Keep pretrained loading enabled to fine-tune this language's generator and vocabulary.",
+            gr.update(value=True, interactive=True),
+        )
+
+    # 4. Single-language models
     else:
         if official_model_id:
             msg = f"🟢 **{model_label}** has a pre-trained `{language}` checkpoint mapped: `{official_model_id}`.\n\n"
@@ -865,7 +882,7 @@ if __name__ == "__main__":
                 allow_custom_value=True,
                 interactive=True,
             )
-            train_language = gr.Dropdown(label="Fine-tuning language", choices=LANGUAGE_CHOICES, value="en", info="Choose your dataset language; available base checkpoints update automatically.")
+            train_language = gr.Dropdown(label="Fine-tuning language", choices=LANGUAGE_CHOICES, value="en", info="Choose your dataset language; available base checkpoints update automatically. MMS uses its published three-letter language codes.")
             with gr.Row():
                 restore_model_dropdown = gr.Dropdown(
                     label="Resume from previous training run",
@@ -1179,11 +1196,18 @@ if __name__ == "__main__":
             outputs=[num_epochs, batch_size],
         )
         model_key.change(
+            fn=update_finetune_language_choices,
+            inputs=[model_key],
+            outputs=[train_language],
+        ).then(
+            fn=update_checkpoint_choices,
+            inputs=[model_key, train_language],
+            outputs=[pretrained_model_id],
+        ).then(
             fn=update_training_options,
             inputs=[model_key, train_language, use_pretrained, pretrained_model_id],
             outputs=[model_checkpoint_warning, use_pretrained],
         )
-        model_key.change(fn=update_checkpoint_choices, inputs=[model_key, train_language], outputs=[pretrained_model_id])
         train_language.change(
             fn=update_training_options,
             inputs=[model_key, train_language, use_pretrained, pretrained_model_id],

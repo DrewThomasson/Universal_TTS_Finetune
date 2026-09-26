@@ -142,6 +142,15 @@ MODEL_SPECS = (
         official_model_id="tts_models/en/ljspeech/vits",
     ),
     ModelSpec(
+        key="mms_vits",
+        label="MMS / Fairseq VITS",
+        recipe_dir="mms_vits",
+        train_script="train_mms_vits.py",
+        family="mms",
+        supports_language=True,
+        notes="Meta MMS checkpoints are licensed CC BY-NC 4.0.",
+    ),
+    ModelSpec(
         key="xtts_v1",
         label="XTTS v1",
         recipe_dir="xtts_v1",
@@ -173,6 +182,13 @@ MODEL_SPECS = (
 )
 
 MODEL_SPECS_BY_KEY = {spec.key: spec for spec in MODEL_SPECS}
+
+# Meta's published MMS TTS catalog includes script and dialect variants.
+# Keep the exact codes because its download URLs use these strings verbatim.
+MMS_LANGUAGES = dict(
+    line.split("\t", 1)
+    for line in (REPO_ROOT / "assets" / "mms_languages.tsv").read_text(encoding="utf-8").splitlines()
+)
 
 # Published Coqui checkpoints whose model architecture matches an existing UFT
 # recipe. Keep the full model ID: dataset and voice variants are distinct bases.
@@ -237,6 +253,9 @@ def normalize_language(language: str) -> str:
 
 def pretrained_model_choices(model_key: str, language: str) -> tuple[str, ...]:
     spec = get_model_spec(model_key)
+    if model_key == "mms_vits":
+        language = language.lower()
+        return (f"tts_models/{language}/fairseq/vits",) if language in MMS_LANGUAGES else ()
     language = normalize_language(language)
     if spec.family == "xtts":
         return (spec.official_model_id,) if spec.official_model_id and language in XTTS_LANGUAGES[model_key] else ()
