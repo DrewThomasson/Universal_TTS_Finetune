@@ -3,10 +3,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from utils.styletts2_utils import _make_ood_texts, train_styletts2
+from utils.styletts2_utils import _make_ood_texts, _read_uft_rows, train_styletts2
 
 
 class StyleTTS2AdapterTests(unittest.TestCase):
+    def test_prepared_ljspeech_clip_ids_resolve_to_wavs(self):
+        with tempfile.TemporaryDirectory() as folder:
+            manifest = Path(folder) / "metadata_train.csv"
+            manifest.write_text("001|hello.|Hello.\n002.wav|goodbye.|Goodbye.\n", encoding="utf-8")
+            self.assertEqual(
+                _read_uft_rows(Path(folder), "train"),
+                [("001.wav", "hello."), ("002.wav", "goodbye.")],
+            )
+
     def test_batch_size_one_is_rejected_before_runtime_or_filesystem_checks(self):
         # The upstream predictor cannot handle batch size 1. Bad paths prove
         # the adapter rejects it before attempting runtime discovery.
