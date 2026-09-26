@@ -78,6 +78,26 @@ class F5MockedTests(unittest.TestCase):
         msg,_=web_gui.update_training_options('f5_tts','fr',True,None)
         self.assertIn('does not support',msg)
 
+    def test_gui_training_latest_load_and_inspect_accept_packaged_config(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            artifacts={'family':'f5_tts','model_key':'f5_tts','model_label':'F5-TTS v1',
+                'training_root':str(root),'artifacts_file':str(root/'artifacts.json'),
+                'checkpoint':str(root/'model.pt'),'config':str(root/'config.json'),'reference_wav':'',}
+            call_args=('f5_tts',None,'en',10,1,1,folder,11,None,True,None,None,0,'')
+            with patch.object(web_gui,'train_model',return_value=artifacts), patch.object(web_gui,'list_trained_models',return_value=[]):
+                trained=web_gui.run_training(*call_args,progress=None)
+            self.assertIn('Training finished',trained[0])
+            self.assertEqual(trained[4],artifacts['config'])
+            with patch.object(web_gui,'find_latest_artifacts',return_value=artifacts), patch.object(web_gui,'list_trained_models',return_value=[]):
+                loaded=web_gui.locate_artifacts(folder,'f5_tts')
+            self.assertIn('Loaded latest artifacts',loaded[0])
+            self.assertEqual(loaded[4],artifacts['config'])
+            with patch.object(web_gui,'load_artifacts',return_value=artifacts):
+                inspected=web_gui.inspect_artifacts(folder,'f5_tts')
+            self.assertIn('Artifacts loaded',inspected[0])
+            self.assertEqual(inspected[4],artifacts['config'])
+
     def test_unsupported_language_and_custom_reference_rejected_without_runtime(self):
         with self.assertRaisesRegex(ValueError,'does not support language'):
             f5tts_utils.synthesize_f5tts({'reference_wav':'/tmp/ref.wav'},'hello','fr',None,'/tmp/out.wav')
