@@ -248,7 +248,7 @@ def list_trained_models(output_root: str | None, model_key: str | None) -> list[
 
 def get_adaptive_defaults(model_key: str, dataset_dir: gr.Dropdown | str | None) -> tuple[int, int]:
     if model_key == "styletts2":
-        return 10, 1
+        return 10, 2
     epochs = 10
     batch_size = 8
     
@@ -703,8 +703,8 @@ def update_training_options(model_key, language, use_pretrained, pretrained_mode
         return (
             "🟡 **StyleTTS2** uses the official LibriTTS base checkpoint. Set `UFT_STYLETTS2_REPO` "
             "to an official StyleTTS2 checkout and `UFT_STYLETTS2_CHECKPOINT` to a local base checkpoint "
-            "before training. Its optional dependencies must be installed separately. Batch size and gradient "
-            "accumulation are limited to 1 in UFT; inference uses the local official LibriTTS runtime, and E2A export is unavailable.",
+            "before training. Its optional dependencies must be installed separately. Batch size 2 and gradient "
+            "accumulation 1 are required; inference uses the local official LibriTTS runtime, and E2A export is unavailable.",
             gr.update(value=True, interactive=False),
         )
 
@@ -820,20 +820,13 @@ def preprocess_and_train(
             progress
         )
         artifacts_file_val = train_res[2]
-        speaker_ref_val = train_res[7]
+        speaker_ref_val = train_res[7] or (preprocess_res[4] if model_key == "styletts2" else None)
         
         if not artifacts_file_val or "failed" in train_res[0].lower():
             train_status_msg = f"Inference skipped because training failed: {train_res[0]}"
             empty_infer = (train_status_msg, None, None)
             return train_res + preprocess_res + empty_infer
 
-        if model_key == "styletts2":
-            return train_res + preprocess_res + (
-                "Training complete. Select the StyleTTS2 run in Inference and provide a speaker reference WAV.",
-                None,
-                None,
-            )
-            
         progress(0.9, desc="Training complete! Starting step 3: Generating test speech...")
         
         infer_res = run_inference(

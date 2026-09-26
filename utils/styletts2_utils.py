@@ -8,10 +8,13 @@ isolated subprocess. It never downloads checkpoints or dependencies.
 from __future__ import annotations
 
 import json
+import math
 import os
+import signal
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -134,7 +137,7 @@ def _validate_runtime(repo: Path, checkpoint: Path, python_executable: str) -> d
     checkpoint = _required_file(checkpoint, "LibriTTS base checkpoint")
     # Check the actual interpreter used for training, which may differ from
     # this process (for example, when UFT is launched outside its venv).
-    modules = ("torch", "torchaudio", "yaml", "munch", "numpy", "librosa", "einops", "transformers", "accelerate", "tensorboard", "monotonic_align")
+    modules = ("torch", "torchaudio", "yaml", "munch", "numpy", "pandas", "librosa", "einops", "transformers", "accelerate", "tensorboard", "monotonic_align", "click")
     probe = "import importlib.util,sys; missing=[m for m in sys.argv[1:] if importlib.util.find_spec(m) is None]; print('\\n'.join(missing)); sys.exit(bool(missing))"
     try:
         checked = subprocess.run(
@@ -188,18 +191,20 @@ def train_styletts2(
     """
     if language.lower().replace("_", "-") not in {"en", "en-us", "en-gb"}:
         raise ValueError("StyleTTS2 adapter currently supports English only (language='en').")
-    if epochs < 1 or batch_size < 1:
-        raise ValueError("epochs and batch_size must be positive integers")
+    if epochs < 1 or batch_size < 2:
+        raise ValueError("StyleTTS2 needs at least one epoch and batch size 2 or greater; upstream fails at batch size 1.")
     dataset = Path(dataset_dir).expanduser().resolve()
     root = Path(training_root).expanduser().resolve()
     paths = _validate_runtime(Path(styletts2_repo).expanduser().resolve(), Path(pretrained_checkpoint).expanduser().resolve(), python_executable)
     train_rows = _read_uft_rows(dataset, "train")
     val_rows = _read_uft_rows(dataset, "val")
+    if len(train_rows) < batch_size:
+        raise ValueError(f"StyleTTS2 needs at least {batch_size} training clips for batch size {batch_size}.")
 
     gpu_total_gib = None
     if not dry_run:
         cuda_probe = subprocess.run(
-            [python_executable, "-c", "import torch,sys; print(torch.cuda.get_device_properties(0).total_memory / 1024**3) if torch.cuda.is_available() else sys.exit(1)"],
+            [python_executable, "-c", "import torch,sys; print(torch.cuda.get_device_properties(0).total_memory / 1024**3, torch.cuda.mem_get_info(0)[0] / 1024**3) if torch.cuda.is_available() else sys.exit(1)"],
             check=False,
             capture_output=True,
             text=True,
@@ -209,7 +214,9 @@ def train_styletts2(
                 "StyleTTS2 fine-tuning needs CUDA in its training Python environment. "
                 "CPU RAM does not replace GPU VRAM; no training process was started."
             )
-        gpu_total_gib = float(cuda_probe.stdout.strip().splitlines()[-1])
+        gpu_total_gib, gpu_free_gib = map(float, cuda_probe.stdout.strip().splitlines()[-1].split())
+        if gpu_free_gib < 9:
+            raise RuntimeError(f"StyleTTS2 needs at least 9 GiB free VRAM for this guarded run; {gpu_free_gib:.1f} GiB is free. No training process was started.")
 
     root.mkdir(parents=True, exist_ok=True)
     data_root = root / "data" / "wavs"
@@ -250,7 +257,7 @@ def train_styletts2(
     if gpu_total_gib is not None and gpu_total_gib < 16:
         # The official recipe's 400-frame crops and SLM adversarial phase can
         # overrun a 12 GiB card. Keep the initial acoustic fine-tuning stage.
-        config["max_len"] = min(int(config.get("max_len", 400)), 200)
+        config["max_len"] = min(int(config.get("max_len", 400)), 96)
         config.setdefault("loss_params", {})["joint_epoch"] = int(epochs) + 1
         _notify(progress, f"StyleTTS2 low-memory profile: {gpu_total_gib:.1f} GiB GPU, max_len={config['max_len']}, SLM adversarial phase disabled.")
     config["save_freq"] = 1
@@ -307,6 +314,11 @@ def train_styletts2(
     _notify(progress, "Starting official StyleTTS2 fine-tuning...")
     environment = os.environ.copy()
     environment.setdefault("TOKENIZERS_PARALLELISM", "false")
+    if gpu_total_gib is not None and gpu_total_gib < 16:
+        environment.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    timeout_seconds = int(environment.get("UFT_STYLETTS2_TIMEOUT_SECONDS", "5400"))
+    if timeout_seconds < 60:
+        raise ValueError("UFT_STYLETTS2_TIMEOUT_SECONDS must be at least 60.")
     with log_path.open("w", encoding="utf-8") as log_stream:
         process = subprocess.Popen(
             command,
@@ -318,15 +330,43 @@ def train_styletts2(
             bufsize=1,
             start_new_session=True,
         )
+        timed_out = threading.Event()
+        def stop_on_timeout() -> None:
+            if process.poll() is None:
+                timed_out.set()
+                try:
+                    if hasattr(os, "killpg"):
+                        os.killpg(process.pid, signal.SIGTERM)
+                    else:
+                        process.terminate()
+                except ProcessLookupError:
+                    return
+                def force_stop() -> None:
+                    if process.poll() is None:
+                        try:
+                            if hasattr(os, "killpg"):
+                                os.killpg(process.pid, signal.SIGKILL)
+                            else:
+                                process.kill()
+                        except ProcessLookupError:
+                            pass
+                threading.Timer(10, force_stop).start()
+        timer = threading.Timer(timeout_seconds, stop_on_timeout)
+        timer.start()
         assert process.stdout is not None
-        for line in process.stdout:
-            log_stream.write(line)
-            log_stream.flush()
-            if stream_logs:
-                sys.stdout.write(line)
-                sys.stdout.flush()
-            _notify(progress, line.rstrip())
-        return_code = process.wait()
+        try:
+            for line in process.stdout:
+                log_stream.write(line)
+                log_stream.flush()
+                if stream_logs:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                _notify(progress, line.rstrip())
+            return_code = process.wait()
+        finally:
+            timer.cancel()
+    if timed_out.is_set():
+        raise TimeoutError(f"StyleTTS2 fine-tuning exceeded {timeout_seconds} seconds and its subprocess group was stopped. See {log_path}.")
     if return_code:
         raise RuntimeError(
             f"StyleTTS2 fine-tuning exited with status {return_code}. See {log_path}. "
@@ -352,7 +392,14 @@ def train_styletts2(
     final_checkpoint = ready / "model.pth"
     shutil.copy2(checkpoints[-1], final_checkpoint)
     ready_config = ready / "config_ft.yml"
-    shutil.copy2(staged_config, ready_config)
+    trained_config = log_dir / staged_config.name
+    config_source = staged_config
+    if trained_config.is_file():
+        trained_values = yaml.safe_load(trained_config.read_text(encoding="utf-8"))
+        sigma_data = trained_values.get("model_params", {}).get("diffusion", {}).get("dist", {}).get("sigma_data")
+        if isinstance(sigma_data, (int, float)) and math.isfinite(sigma_data):
+            config_source = trained_config
+    shutil.copy2(config_source, ready_config)
     artifacts = {
         **result,
         "checkpoint": str(final_checkpoint),
