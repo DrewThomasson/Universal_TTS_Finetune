@@ -1705,12 +1705,22 @@ def train_model(
     language = language.lower() if model_key == "mms_vits" else normalize_language(language)
     if spec.family == "xtts" and not pretrained_model_choices(model_key, language):
         raise ValueError(f"{spec.label} does not support language {language}.")
+    if spec.family == "mms" and not pretrained_model_choices(model_key, language):
+        raise ValueError(f"{spec.label} has no published checkpoint for language {language}.")
+    if spec.family in {"xtts", "mms"} and not use_pretrained and not restore_path:
+        raise ValueError(f"{spec.label} requires a starting checkpoint; --no-pretrained needs --restore-path.")
     if model_key == "align_tts" and language != "en":
         raise ValueError("Align TTS currently uses an English-only character vocabulary.")
     if spec.family == "tts" and model_key != "align_tts":
         coqui_phoneme_language(language)
     dataset_root = _normalize_dataset_dir(dataset_dir, output_root)
     dataset_info = load_dataset_info(str(dataset_root))
+    if spec.family == "tts" and not restore_path and (not use_pretrained or not pretrained_model_choices(model_key, language)):
+        _notify(
+            progress,
+            f"WARNING: {spec.label} will train {language} from random weights. "
+            "Expect hours of audio and substantially longer training for intelligible speech.",
+        )
     extra_phonemes = ""
     if spec.family == "tts" and model_key != "align_tts":
         recipe_source = spec.train_script_path.read_text(encoding="utf-8")
@@ -1783,7 +1793,11 @@ def train_model(
             quality = checkpoint_info.get("quality", "medium")
             espeak_language = ckpt_config.get("espeak", {}).get("voice") or checkpoint_info["locale"].lower().replace("_", "-")
         else:
-            _notify(progress, f"Training Piper model from scratch for language: {language}...")
+            _notify(
+                progress,
+                f"WARNING: Piper will train {language} from random weights. "
+                "Expect hours of audio and substantially longer training for intelligible speech.",
+            )
 
         espeak_language = normalize_espeak_language(espeak_language)
 

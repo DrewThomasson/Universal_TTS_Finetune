@@ -703,11 +703,8 @@ def update_training_options(model_key, language, use_pretrained, pretrained_mode
         if not choices:
             return f"❌ **{model_label}** does not support `{language}`. Choose another language or model.", gr.update(value=False, interactive=False)
         msg = f"🟢 **{model_label}** supports `{language}` using a multilingual checkpoint.\n\n"
-        if use_pretrained:
-            msg += f"Fine-tuning will start from the official pre-trained multilingual checkpoint: `{official_model_id}`."
-        else:
-            msg += "**Training from scratch** (random initialization). *Note: training a large GPT model like XTTS from scratch requires massive amounts of data and compute. Fine-tuning is highly recommended.*"
-        return msg, gr.update(interactive=True)
+        msg += f"Fine-tuning requires the official multilingual checkpoint: `{official_model_id}` (or a local restore checkpoint)."
+        return msg, gr.update(value=True, interactive=False)
 
     # 2. Piper family
     elif family == "piper":
@@ -746,7 +743,7 @@ def update_training_options(model_key, language, use_pretrained, pretrained_mode
         return (
             f"🟢 **{model_label}** uses `{official_model_id}`. Meta publishes these checkpoints under CC BY-NC 4.0. "
             "Keep pretrained loading enabled to fine-tune this language's generator and vocabulary.",
-            gr.update(value=True, interactive=True),
+            gr.update(value=True, interactive=False),
         )
 
     # 4. Single-language models
