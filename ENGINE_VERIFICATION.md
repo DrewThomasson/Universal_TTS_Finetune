@@ -38,6 +38,7 @@ Updated 2026-09-26. **Pass** means the linked report establishes that check. **â
 | mms_vits (Fairseq) | 50 steps | Pass | â€”* | â€” | eng | e36d0a6 |
 | styletts2 | 10 steps | Pass | Pass | Pass | en | db67c2a |
 | omnivoice | 10 LoRA steps | Pass | Pass: en/es | Pass: es | en | 550ec3a |
+| f5_tts | 11 / 3 steps | Pass | Pass: en/zh-cn | Pass: en/zh-cn | en / zh-cn | 3562404 |
 
 * MMS's exported model reloaded and generated a valid WAV; a separate CLI inference check is not established by its report.
 
@@ -48,6 +49,7 @@ Updated 2026-09-26. **Pass** means the linked report establishes that check. **â
 - StyleTTS2 and OmniVoice passed GUI HTTP startup and real inference callbacks. A complete browser walkthrough is not recorded. Their optional runtimes are not bundled into or runtime-tested in the base Docker image.
 - StyleTTS2 was tested in English on a 12 GB RTX 3060. Its guarded profile skips joint SLM adversarial training.
 - OmniVoice was trained in English on a 24 GB RTX 3090; English/Spanish inference passed. The 646 published language IDs were catalog-validated, not individually trained. Scratch training, local resume, reference voice cloning and E2A export are not exposed for its LoRA adapter.
+- F5-TTS v1 passed English and Chinese smoke training on a 12 GB RTX 3060. Online weights changed from the base; both languages passed CLI/GUI inference, artifact loading and GUI HTTP startup. The base Docker image built and started successfully; its optional F5 runtime was installed separately in a temporary GPU container for these tests.
 - Language, transcription and export audits are separate from training/inference passes. Speech quality, long runs and every language/checkpoint variant remain unverified.
 
 ## Test reports
