@@ -32,7 +32,7 @@ On Windows, activate with `.venv\Scripts\activate` instead. Open **http://localh
 
 ## Fine-tune in three steps
 
-1. **Prepare dataset:** Add audio clips and, if you have them, matching transcripts. You can also supply an E2A audiobook with its matching `.vtt` file. Without transcripts, the app uses Whisper. Select the dataset language and create the dataset.
+1. **Prepare dataset:** Add audio clips and, if you have them, matching transcripts. You can also supply an E2A audiobook with its matching `.vtt` file. Select the dataset language and create the dataset. Without transcripts, `auto` uses Whisper for short language codes (such as `en`) and MMS ASR for published MMS codes (such as `eng`). You can choose either backend explicitly. Exact transcript maps and alignment files bypass ASR. MMS ASR needs a [published adapter](https://huggingface.co/facebook/mms-1b-all) for the selected language; its model is licensed CC BY-NC 4.0.
 2. **Train model:** Select the dataset, engine, and fine-tuning language. Choose a published **starting checkpoint** when one is available, then start training. Piper choices show language, locale, voice, and quality. A ready-to-speak Piper ONNX voice is different from a training checkpoint; UFT does not silently substitute an English checkpoint. MMS/Fairseq VITS uses Meta's published three-letter language codes and requires its matching checkpoint. Those checkpoints carry a CC BY-NC 4.0 license.
 3. **Inference:** Select the finished run and generate a short sample. XTTS also needs a speaker reference WAV.
 
@@ -45,7 +45,7 @@ On Windows, activate with `.venv\Scripts\activate` instead. Open **http://localh
 
 The app stores prepared data under `<output_root>/dataset/` and finished models under `<output_root>/training_runs/<model>/<run>/ready/`. Keep `artifacts.json` with the model files so UFT can load the run later.
 
-For an XTTSv2 model you want to use in E2A, follow E2A's [custom model ZIP instructions](https://github.com/DrewThomasson/ebook2audiobook#example-of-custom-model-zip-upload). The XTTSv2 `ready/` folder contains the trained model, config, vocabulary, and reference audio needed for that package; E2A expects the reference audio named `ref.wav`.
+For an E2A custom voice, load the finished run in **Inference** and click **Create E2A upload ZIP**. This supports XTTS v1/v2, VITS, MMS/Fairseq VITS, and Piper, and packages the exact filenames E2A requires. Other UFT engines are not accepted by E2A's custom model upload. You can also run `python headless_cli.py export-e2a --artifacts /path/to/ready/artifacts.json --output-file /path/to/voice.zip`.
 
 ## Command line
 
