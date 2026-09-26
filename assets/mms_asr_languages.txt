@@ -161,6 +161,14 @@ bzi
 bzj
 caa
 cab
+cac-dialect_sanmateoixtatan
+cac-dialect_sansebastiancoatan
+cak-dialect_central
+cak-dialect_santamariadejesus
+cak-dialect_santodomingoxenacoj
+cak-dialect_southcentral
+cak-dialect_western
+cak-dialect_yepocapa
 cap
 car
 cas
@@ -257,6 +265,8 @@ dik
 dip
 div
 djk
+dnj-dialect_blowowest
+dnj-dialect_gweetaawueast
 dnt
 dnw
 dop
@@ -374,6 +384,8 @@ hto
 hub
 hui
 hun
+hus-dialect_centralveracruz
+hus-dialect_westernpotosino
 huu
 huv
 hvn
@@ -407,6 +419,9 @@ isl
 ita
 itl
 itv
+ixl-dialect_sangasparchajul
+ixl-dialect_sanjuancotzal
+ixl-dialect_santamarianebaj
 izr
 izz
 jac
@@ -582,6 +597,8 @@ luo
 lwo
 lww
 lzz
+maa-dialect_sanantonio
+maa-dialect_sanjeronimo
 mad
 mag
 mah
@@ -589,6 +606,10 @@ mai
 maj
 mak
 mal
+mam-dialect_central
+mam-dialect_northern
+mam-dialect_southern
+mam-dialect_western
 maq
 mar
 maw
@@ -814,6 +835,8 @@ pls
 plw
 pmf
 pny
+poh-dialect_eastern
+poh-dialect_western
 poi
 pol
 por
@@ -832,6 +855,9 @@ pwg
 pww
 pxm
 qub
+quc-dialect_central
+quc-dialect_east
+quc-dialect_north
 quf
 quh
 qul
@@ -875,6 +901,8 @@ rmy-script_cyrillic
 rmy-script_latin
 rng
 rnl
+roh-dialect_sursilv
+roh-dialect_vallader
 rol
 ron
 rop
@@ -1040,6 +1068,12 @@ txa
 txq
 txu
 tye
+tzh-dialect_bachajon
+tzh-dialect_tenejapa
+tzj-dialect_eastern
+tzj-dialect_western
+tzo-dialect_chamula
+tzo-dialect_chenalho
 ubl
 ubu
 udm
