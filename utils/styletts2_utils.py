@@ -196,6 +196,19 @@ def train_styletts2(
     train_rows = _read_uft_rows(dataset, "train")
     val_rows = _read_uft_rows(dataset, "val")
 
+    if not dry_run:
+        cuda_probe = subprocess.run(
+            [python_executable, "-c", "import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if cuda_probe.returncode:
+            raise RuntimeError(
+                "StyleTTS2 fine-tuning needs CUDA in its training Python environment. "
+                "CPU RAM does not replace GPU VRAM; no training process was started."
+            )
+
     root.mkdir(parents=True, exist_ok=True)
     data_root = root / "data" / "wavs"
     list_root = root / "data" / "lists"
