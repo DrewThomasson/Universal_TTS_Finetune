@@ -6,30 +6,29 @@ Prepare voice recordings, fine-tune a TTS model, and try it in a browser. This t
 
 ## Quick start with Docker
 
-Clone this repo into an E2A checkout, or clone it elsewhere if you prefer:
+Clone and run UFT on its own:
 
 ```bash
-cd /path/to/ebook2audiobook/components
 git clone https://github.com/DrewThomasson/Universal_TTS_Finetune.git
 cd Universal_TTS_Finetune
 docker compose up --build
 ```
 
-Open **http://localhost:7862**. Put local recordings in `audio_data/` and use `/app/audio_data` in the GUI. Datasets and trained models persist in `finetune_models/`; downloaded base models persist in `models/`. The supplied Compose file requests an NVIDIA GPU and needs the NVIDIA Container Toolkit.
+Open **http://localhost:7862**. Put local recordings in `audio_data/` and use `/app/audio_data` in the GUI. Datasets and trained models persist in `finetune_models/`; downloaded base models persist in `models/`. The supplied Compose file requests an NVIDIA GPU and needs the NVIDIA Container Toolkit. UFT can also be cloned into E2A's `components/` folder, but does not require E2A.
 
 ## Install
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and use a separate Python 3.12 environment:
 
 ```bash
-cd /path/to/ebook2audiobook/components/Universal_TTS_Finetune
+cd Universal_TTS_Finetune
 uv venv --python 3.12 .venv
 source .venv/bin/activate
 uv pip install -r requirements.txt
 python web_gui.py
 ```
 
-On Windows, activate with `.venv\Scripts\activate` instead. Open **http://localhost:7862**. You can set `--out_path /path/to/output` and `--port 7862` when launching the GUI. A CUDA GPU speeds up training; CPU training can be slow. A native install under E2A's `components/` folder shares its `models/` cache; a standalone clone keeps downloads in its own `models/` folder.
+On Windows, activate with `.venv\Scripts\activate` instead. Open **http://localhost:7862**. You can set `--out_path /path/to/output` and `--port 7862` when launching the GUI. A CUDA GPU speeds up training; CPU training can be slow. Model downloads stay in this repo's `models/` folder by default, even when cloned inside E2A. Set `UFT_MODELS_DIR=/path/to/ebook2audiobook/models` before launch if you want to share E2A's cache.
 
 ## Fine-tune in three steps
 
