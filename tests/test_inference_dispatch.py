@@ -9,6 +9,7 @@ import types
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
+from utils.styletts2_infer import _WORKER
 
 
 def _module(name: str, **attrs):
@@ -139,19 +140,26 @@ class InferenceDispatchTests(unittest.TestCase):
                         load_tts.assert_called_once()
                         runtime.tts_to_file.assert_called_once()
 
-    def test_optional_adapter_artifacts_are_rejected_by_builtin_inference(self):
-        for family in ("styletts2", "omnivoice"):
-            with self.subTest(family=family), tempfile.TemporaryDirectory() as temp_dir:
-                artifacts = {"family": family}
-                with patch.object(pipeline, "load_artifacts", return_value=artifacts):
-                    with self.assertRaisesRegex(ValueError, "does not provide built-in inference"):
-                        pipeline.synthesize(
-                            artifacts_path_or_dir=temp_dir,
-                            text="sample",
-                            output_file=str(Path(temp_dir) / "out.wav"),
-                        )
+    def test_styletts2_routes_to_local_optional_adapter_with_reference_wav(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifacts = {"family": "styletts2", "model_key": "styletts2", "reference_wav": ""}
+            adapter_call = Mock(return_value={"model_key": "styletts2", "output_file": str(root / "out.wav")})
+            adapter = _module("utils.styletts2_infer", synthesize_styletts2=adapter_call)
+            with patch.object(pipeline, "load_artifacts", return_value=artifacts), \
+                 patch.dict(sys.modules, {"utils.styletts2_infer": adapter}):
+                result = pipeline.synthesize(
+                    artifacts_path_or_dir=str(root), text="sample", speaker_wav="reference.wav",
+                    output_file=str(root / "out.wav"),
+                )
+            adapter_call.assert_called_once()
+            self.assertEqual(adapter_call.call_args.kwargs["reference_wav"], "reference.wav")
+            self.assertEqual(result["model_key"], "styletts2")
 
-    def test_gui_inference_choices_include_exactly_the_17_builtin_engines(self):
+    def test_styletts2_official_worker_source_is_syntactically_valid(self):
+        compile(_WORKER, "styletts2_inference_worker.py", "exec")
+
+    def test_gui_inference_choices_include_styletts2(self):
         gui_keys = {key for _label, key in web_gui.INFERENCE_MODEL_CHOICES}
         expected_keys = {key for key, _family in [
             ("align_tts", "tts"), ("delightful_tts", "tts"), ("fast_pitch", "tts"),
@@ -161,9 +169,7 @@ class InferenceDispatchTests(unittest.TestCase):
             ("tacotron2_ddc", "tts"), ("vits_tts", "tts"), ("mms_vits", "mms"),
             ("xtts_v1", "xtts"), ("xtts_v2", "xtts"), ("piper", "piper"),
         ]}
-        self.assertEqual(gui_keys, expected_keys)
-        self.assertNotIn("styletts2", gui_keys)
-        self.assertNotIn("omnivoice", gui_keys)
+        self.assertEqual(gui_keys, expected_keys | {"styletts2"})
 
     def test_gui_run_inference_delegates_once_to_pipeline(self):
         with tempfile.TemporaryDirectory() as temp_dir:
