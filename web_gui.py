@@ -48,7 +48,7 @@ from utils.pipeline import (
     pause_training,
     resume_training,
 )
-from utils.model_registry import MMS_LANGUAGES, XTTS_LANGUAGES, pretrained_model_choices
+from utils.model_registry import MMS_LANGUAGES, OMNIVOICE_LANGUAGES, XTTS_LANGUAGES, pretrained_model_choices
 from utils.asr import MMS_ASR_LANGUAGES
 from utils.e2a_export import export_e2a_zip
 from utils.language_support import coqui_phoneme_language
@@ -87,7 +87,9 @@ XTTS_LANGUAGE_CHOICES = {
 }
 WHISPER_CHOICES = ["large-v3", "large-v2", "large", "distil-large-v3", "distil-large-v2", "medium", "medium.en", "small", "small.en", "base", "base.en", "tiny", "tiny.en"]
 MODEL_CHOICES = [(label, key) for key, label in dropdown_choices()]
+INFERENCE_MODEL_CHOICES = [(label, key) for label, key in MODEL_CHOICES if key not in {"styletts2", "omnivoice"}]
 MMS_LANGUAGE_CHOICES = [(f"{name} ({code})", code) for code, name in MMS_LANGUAGES.items()]
+OMNIVOICE_LANGUAGE_CHOICES = [(f"{name} ({code})", code) for code, name in OMNIVOICE_LANGUAGES.items()]
 DATASET_LANGUAGE_CHOICES = LANGUAGE_CHOICES + [
     (f"{MMS_LANGUAGES.get(code, code)} ({code})", code)
     for code in sorted(MMS_ASR_LANGUAGES) if code not in LANGUAGE_CHOICES
@@ -106,6 +108,10 @@ def _phonemizer_language_choices(choices):
 
 
 def update_finetune_language_choices(model_key):
+    if model_key == "styletts2":
+        return gr.update(choices=["en"], value="en")
+    if model_key == "omnivoice":
+        return gr.update(choices=OMNIVOICE_LANGUAGE_CHOICES, value="en")
     if model_key in XTTS_LANGUAGE_CHOICES:
         return gr.update(choices=XTTS_LANGUAGE_CHOICES[model_key], value="en")
     if model_key == "mms_vits":
@@ -244,6 +250,8 @@ def list_trained_models(output_root: str | None, model_key: str | None) -> list[
 
 
 def get_adaptive_defaults(model_key: str, dataset_dir: gr.Dropdown | str | None) -> tuple[int, int]:
+    if model_key in {"styletts2", "omnivoice"}:
+        return 10, 1
     epochs = 10
     batch_size = 8
     
@@ -307,8 +315,10 @@ def update_trained_models(out_root: str | None, model_key: str | None) -> gr.Dro
 
 
 def update_resume_models(out_root: str | None, model_key: str | None) -> gr.Dropdown:
+    if model_key in {"styletts2", "omnivoice"}:
+        return gr.update(choices=[("None", "")], value="", interactive=False)
     choices = [("None", "")] + list_trained_models(out_root, model_key)
-    return gr.update(choices=choices, value="")
+    return gr.update(choices=choices, value="", interactive=True)
 
 
 def resolve_resume_checkpoint(artifacts_file_path: str) -> str:
@@ -656,7 +666,7 @@ def select_trained_model(val):
 
 def on_training_params_change(model_key, dataset_dir):
     epochs, batch_size = get_adaptive_defaults(model_key, dataset_dir)
-    return epochs, batch_size
+    return epochs, gr.update(value=batch_size, interactive=model_key not in {"styletts2", "omnivoice"})
 
 
 def update_checkpoint_choices(model_key, language):
@@ -672,7 +682,7 @@ def update_checkpoint_choices(model_key, language):
         ]
     else:
         choices = [
-            (f"{parts[2].replace('_', ' ').title()} · {parts[3].replace('_', ' ').title()}", model_id)
+            (f"{parts[2].replace('_', ' ').title()} · {parts[3].replace('_', ' ').title()}" if len(parts) >= 4 else model_id, model_id)
             for model_id in pretrained_model_choices(model_key, language)
             for parts in [model_id.split("/")]
         ]
@@ -689,6 +699,27 @@ def update_training_options(model_key, language, use_pretrained, pretrained_mode
         family = spec.family
     except Exception as exc:
         return f"Error loading model spec: {exc}", gr.update()
+
+    if family == "styletts2":
+        if language != "en":
+            return "❌ StyleTTS2 currently supports English fine-tuning only.", gr.update(value=True, interactive=False)
+        return (
+            "🟡 **StyleTTS2** uses the official LibriTTS base checkpoint. Set `UFT_STYLETTS2_REPO` "
+            "to an official StyleTTS2 checkout and `UFT_STYLETTS2_CHECKPOINT` to a local base checkpoint "
+            "before training. Its optional dependencies must be installed separately. Batch size and gradient "
+            "accumulation are limited to 1 in UFT; built-in inference and E2A export are unavailable.",
+            gr.update(value=True, interactive=False),
+        )
+    if family == "omnivoice":
+        if not official_model_id:
+            return f"❌ OmniVoice has no mapped checkpoint for `{language}`.", gr.update(value=True, interactive=False)
+        return (
+            f"🟡 **OmniVoice** uses `{official_model_id}` for `{language}`. Its base model, audio tokenizer, "
+            "and Qwen3-0.6B must be cached locally. The guarded trainer requires one CUDA GPU with at least "
+            "16 GiB total and 12 GiB free VRAM, so a 12 GB card is blocked before training. "
+            "Batch size and gradient accumulation are limited to 1 in UFT; built-in inference and E2A export are unavailable.",
+            gr.update(value=True, interactive=False),
+        )
 
     if family == "tts" and model_key != "align_tts":
         try:
@@ -808,6 +839,13 @@ def preprocess_and_train(
             train_status_msg = f"Inference skipped because training failed: {train_res[0]}"
             empty_infer = (train_status_msg, None, None)
             return train_res + preprocess_res + empty_infer
+
+        if model_key in {"styletts2", "omnivoice"}:
+            return train_res + preprocess_res + (
+                "Training complete. Use the official model runtime for inference; UFT does not load this checkpoint.",
+                None,
+                None,
+            )
             
         progress(0.9, desc="Training complete! Starting step 3: Generating test speech...")
         
@@ -1011,7 +1049,7 @@ if __name__ == "__main__":
             latest_btn = gr.Button(value="Load latest trained model")
 
         with gr.Tab("3 - Inference"):
-            infer_model_key = gr.Dropdown(label="Model", choices=MODEL_CHOICES, value="xtts_v2")
+            infer_model_key = gr.Dropdown(label="Model", choices=INFERENCE_MODEL_CHOICES, value="xtts_v2")
             infer_trained_model = gr.Dropdown(
                 label="Select previously fine-tuned model",
                 choices=list_trained_models(args.out_path, "xtts_v2"),
@@ -1282,6 +1320,20 @@ if __name__ == "__main__":
             fn=on_training_params_change,
             inputs=[model_key, train_dataset_dir],
             outputs=[num_epochs, batch_size],
+        )
+        model_key.change(
+            fn=lambda model: gr.update(
+                label="Local StyleTTS2 base checkpoint" if model == "styletts2" else "Restore path unavailable" if model == "omnivoice" else "Optional checkpoint to continue from",
+                value="",
+                interactive=model != "omnivoice",
+            ),
+            inputs=[model_key],
+            outputs=[restore_path],
+        )
+        model_key.change(
+            fn=lambda model: gr.update(value=1, interactive=False) if model in {"styletts2", "omnivoice"} else gr.update(interactive=True),
+            inputs=[model_key],
+            outputs=[grad_accum],
         )
         model_key.change(
             fn=update_finetune_language_choices,

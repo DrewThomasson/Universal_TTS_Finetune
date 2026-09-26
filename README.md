@@ -1,6 +1,6 @@
 # Universal TTS Finetune
 
-Prepare voice recordings, fine-tune a TTS model, and try it in a browser. This tool runs separately from [ebook2audiobook](https://github.com/DrewThomasson/ebook2audiobook) and supports 17 Coqui, MMS/Fairseq, and Piper training engines.
+Prepare voice recordings, fine-tune a TTS model, and try it in a browser. This tool runs separately from [ebook2audiobook](https://github.com/DrewThomasson/ebook2audiobook) and offers 19 training engines, including optional StyleTTS2 and OmniVoice adapters.
 
 ![Universal TTS Finetune web GUI showing dataset preparation](assets/web_gui.png)
 
@@ -36,7 +36,7 @@ On Windows, activate with `.venv\Scripts\activate` instead. Open **http://localh
 2. **Train model:** Select the dataset, engine, and fine-tuning language. Choose a published **starting checkpoint** when one is available, then start training. XTTS v1/v2 list only their supported languages (14/17); selecting another engine may require training from scratch if no checkpoint is mapped. Piper choices show language, locale, voice, and quality. A ready-to-speak Piper ONNX voice is different from a training checkpoint; UFT does not silently substitute an English checkpoint. MMS/Fairseq VITS uses Meta's published three-letter language codes and requires its matching checkpoint. Those checkpoints carry a CC BY-NC 4.0 license.
 
 The training language list follows each engine: Coqui phoneme models show languages supported by the installed phonemizer, Align TTS currently uses English only, and Piper stops with an error if its selected eSpeak voice is unavailable. For Coqui scratch runs, UFT includes the dataset's phoneme symbols in the model vocabulary; a mapped checkpoint cannot expand its fixed vocabulary and UFT reports an error if the dataset needs extra symbols. A language without a starting checkpoint needs substantially more data and training time.
-3. **Inference:** Select the finished run and generate a short sample. XTTS also needs a speaker reference WAV.
+3. **Inference:** Select the finished run and generate a short sample. XTTS also needs a speaker reference WAV. StyleTTS2 and OmniVoice checkpoints use their official runtimes for inference.
 
 <details>
 <summary>See the model and starting-checkpoint controls</summary>
@@ -46,6 +46,15 @@ The training language list follows each engine: Coqui phoneme models show langua
 </details>
 
 The app stores prepared data under `<output_root>/dataset/` and finished models under `<output_root>/training_runs/<model>/<run>/ready/`. Keep `artifacts.json` with the model files so UFT can load the run later.
+
+### Optional StyleTTS2 and OmniVoice engines
+
+These adapters reuse the prepared UFT dataset and run the official training code. Their dependencies and model weights are optional; the base Docker image does not include them. Choose batch size **1**, gradient accumulation **1**, and a matching language in the GUI or CLI.
+
+- **StyleTTS2:** English only. Clone the [official source](https://github.com/yl4579/StyleTTS2), install its requirements in a separate compatible Python environment, and obtain its [LibriTTS base checkpoint and required ASR/JDC/PL-BERT assets](https://github.com/yl4579/StyleTTS2#pre-trained-models). Set `UFT_STYLETTS2_REPO` to that checkout, `UFT_STYLETTS2_CHECKPOINT` to the local LibriTTS `.pth`, and `UFT_STYLETTS2_PYTHON` to the interpreter with the official dependencies if different from UFT's. The adapter keeps generated data in the UFT output folder and never downloads these assets for you.
+- **OmniVoice:** Select an exact language ID from the official [language list](https://github.com/k2-fsa/OmniVoice/blob/master/docs/lang_id_name_map.tsv). Install the [official OmniVoice LoRA dependencies](https://github.com/k2-fsa/OmniVoice/blob/master/docs/lora_finetuning.md), then explicitly cache `k2-fsa/OmniVoice`, `eustlb/higgs-audio-v2-tokenizer`, and `Qwen/Qwen3-0.6B` in Hugging Face's local cache. Its guarded single-GPU LoRA runner requires **at least 16 GiB total and 12 GiB free VRAM**, plus 20 GiB free disk, and rejects smaller machines before tokenization or training. It does not fetch models automatically.
+
+Both adapters record their checkpoint in `ready/artifacts.json`; built-in UFT inference and E2A upload ZIP are unavailable for these formats.
 
 For an E2A custom voice, load the finished run in **Inference** and click **Create E2A upload ZIP**. This supports XTTS v1/v2, VITS, MMS/Fairseq VITS, and Piper, and packages the exact filenames E2A requires. Other UFT engines are not accepted by E2A's custom model upload. You can also run `python headless_cli.py export-e2a --artifacts /path/to/ready/artifacts.json --output-file /path/to/voice.zip`.
 
