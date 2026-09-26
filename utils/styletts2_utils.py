@@ -53,6 +53,10 @@ def _read_uft_rows(dataset_dir: Path, split_name: str) -> list[tuple[str, str]]:
                 continue
             if Path(clip).name != clip:
                 raise ValueError(f"Unsafe clip path in {manifest.name} line {line_number}: {clip!r}")
+            # UFT's prepare-dataset writes LJSpeech clip IDs without the WAV
+            # extension; hand-authored manifests may include it already.
+            if not Path(clip).suffix:
+                clip += ".wav"
             if "|" in text or "\n" in text or "\r" in text:
                 raise ValueError(
                     f"Unsupported pipe or newline in transcript at {manifest.name} line {line_number}; "
