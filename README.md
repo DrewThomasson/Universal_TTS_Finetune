@@ -107,7 +107,7 @@ Fine-tune the official F5-TTS v1 base in English (`en`) or Chinese (`zh-cn`). In
 export UFT_F5TTS_PYTHON=/path/to/f5-env/bin/python
 ```
 
-Select **F5-TTS v1**, your prepared dataset and its language. Start with batch size 1 and short clips. UFT downloads the official base on first training and Vocos on first inference. Training uses the official trainer, mixed precision and 8-bit Adam; generated data stays in your output folder.
+Select **F5-TTS v1**, your prepared dataset and its language. Start with batch size 1 and short clips on Linux/CUDA. UFT requires at least 9 GiB free GPU memory and 12 GiB free disk before training. UFT downloads the official base on first training and Vocos on first inference. Training uses the official trainer, mixed precision and 8-bit Adam; generated data stays in your output folder.
 
 The finished artifact includes online model weights, vocabulary and a reference clip with its exact text. CLI and GUI inference use that reference without transcription. Other languages, custom reference audio, scratch training, resume, periodic audio samples and E2A export are not exposed. The base Docker image excludes this optional runtime; mount your separate environment and cache when using it with Docker.
 
