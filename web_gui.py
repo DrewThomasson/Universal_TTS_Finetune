@@ -74,6 +74,12 @@ LANGUAGE_CHOICES = [
     "hr", "lt", "lv", "mt", "ro", "sk", "sl", "sr", "sv", "ca",
     "cy", "is", "ka", "kk", "lb", "ne", "no", "sw", "ur", "vi",
 ]
+# Published Piper training checkpoints include these languages in addition to
+# the shared language list. zh-cn in the shared list resolves to Piper's zh family.
+PIPER_LANGUAGE_CHOICES = sorted(set(LANGUAGE_CHOICES) | {
+    "bn", "he", "id", "ku", "ml", "mr", "te", "th",
+})
+VITS_LANGUAGE_CHOICES = sorted(set(LANGUAGE_CHOICES) | {"bn"})
 WHISPER_CHOICES = ["large-v3", "large-v2", "large", "distil-large-v3", "distil-large-v2", "medium", "medium.en", "small", "small.en", "base", "base.en", "tiny", "tiny.en"]
 MODEL_CHOICES = [(label, key) for key, label in dropdown_choices()]
 MMS_LANGUAGE_CHOICES = [(f"{name} ({code})", code) for code, name in MMS_LANGUAGES.items()]
@@ -86,6 +92,10 @@ DATASET_LANGUAGE_CHOICES = LANGUAGE_CHOICES + [
 def update_finetune_language_choices(model_key):
     if model_key == "mms_vits":
         return gr.update(choices=MMS_LANGUAGE_CHOICES, value="eng")
+    if model_key == "piper":
+        return gr.update(choices=PIPER_LANGUAGE_CHOICES, value="en")
+    if model_key == "vits_tts":
+        return gr.update(choices=VITS_LANGUAGE_CHOICES, value="en")
     return gr.update(choices=LANGUAGE_CHOICES, value="en")
 
 
@@ -639,7 +649,11 @@ def update_checkpoint_choices(model_key, language):
             for item in checkpoints
         ]
     else:
-        choices = [(model_id.split("/")[2].replace("_", " ").title(), model_id) for model_id in pretrained_model_choices(model_key, language)]
+        choices = [
+            (f"{parts[2].replace('_', ' ').title()} · {parts[3].replace('_', ' ').title()}", model_id)
+            for model_id in pretrained_model_choices(model_key, language)
+            for parts in [model_id.split("/")]
+        ]
     return gr.update(choices=choices, value=choices[0][1] if choices else None, interactive=bool(choices))
 
 
