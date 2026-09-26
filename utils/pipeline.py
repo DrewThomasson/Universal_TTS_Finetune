@@ -28,6 +28,7 @@ try:
 except ImportError:
     pass
 
+import ast
 import csv
 import json
 import random
@@ -41,14 +42,14 @@ import warnings
 from dataclasses import asdict
 import os
 from pathlib import Path
+from utils.model_paths import get_models_dir
 
 _PROJECT_ROOT = Path(__file__).parent.parent.resolve()
-_MODELS_DIR = _PROJECT_ROOT / "models"
-_MODELS_DIR.mkdir(exist_ok=True)
+_MODELS_DIR = get_models_dir()
 
-os.environ["HF_HOME"] = str(_MODELS_DIR)
-os.environ["TTS_HOME"] = str(_MODELS_DIR)
-os.environ["TORCH_HOME"] = str(_MODELS_DIR)
+os.environ['HF_HOME'] = str(_MODELS_DIR)
+os.environ['TTS_HOME'] = str(_MODELS_DIR)
+os.environ['TORCH_HOME'] = str(_MODELS_DIR)
 
 _CURRENT_PROCESS: subprocess.Popen | None = None
 
@@ -99,7 +100,7 @@ from TTS.tts.configs.xtts_config import XttsConfig
 from TTS.tts.models.xtts import Xtts
 from TTS.utils.manage import ModelManager
 
-from utils.model_registry import MODEL_SPECS, get_model_spec, list_model_choices
+from utils.model_registry import MODEL_SPECS, get_model_spec, list_model_choices, normalize_language, pretrained_model_choices
 from utils.tokenizer import multilingual_cleaners
 
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".m4a", ".ogg"}
@@ -226,6 +227,32 @@ def _load_waveform(audio_path: Path, sample_rate: int = DEFAULT_SAMPLE_RATE) -> 
         waveform = torchaudio.functional.resample(waveform, source_rate, sample_rate)
         source_rate = sample_rate
     return waveform, source_rate
+
+
+def _read_waveform_slice(
+    audio_path: Path,
+    start_frame: int,
+    num_frames: int,
+    target_rate: int = DEFAULT_SAMPLE_RATE,
+) -> torch.Tensor:
+    try:
+        data, source_rate = sf.read(
+            str(audio_path), start=start_frame, frames=num_frames, always_2d=False
+        )
+        waveform = torch.tensor(data, dtype=torch.float32)
+        if waveform.ndim == 1:
+            waveform = waveform.unsqueeze(0)
+        else:
+            waveform = waveform.transpose(0, 1)
+    except Exception:
+        waveform, source_rate = torchaudio.load(
+            str(audio_path), frame_offset=start_frame, num_frames=num_frames
+        )
+    if waveform.size(0) > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)
+    if source_rate != target_rate:
+        waveform = torchaudio.functional.resample(waveform, source_rate, target_rate)
+    return waveform
 
 
 def _save_waveform(destination: Path, waveform: torch.Tensor, sample_rate: int) -> None:
@@ -407,6 +434,151 @@ def _extract_speaker_embeddings_pyannote(entries: list[dict[str, Any]], progress
     return np.array(embeddings)
 
 
+def format_timestamp(seconds: float) -> str:
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millis = int(round((seconds - int(seconds)) * 1000))
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
+
+
+def align_audio_and_text_to_vtt(
+    audio_path: Path,
+    text_path: Path,
+    language: str,
+    output_vtt_path: Path,
+    progress: ProgressCallback = None,
+    auto_split_sentences: bool = True,
+) -> None:
+    from uroman import Uroman
+    from torchaudio.pipelines import MMS_FA as bundle
+    import re
+
+    _notify(progress, f"Reading transcript from {text_path.name}...")
+    raw_text = text_path.read_text(encoding="utf-8", errors="ignore")
+    if auto_split_sentences:
+        _notify(progress, "Auto-splitting transcript into sentences...")
+        paragraphs = [p.strip() for p in raw_text.splitlines() if p.strip()]
+        lines = []
+        for para in paragraphs:
+            sentence_splits = re.split(r'(?<=[.!?])\s+|(?<=[.!?]["”\'’»」])\s+', para)
+            for s in sentence_splits:
+                s_clean = s.strip()
+                if s_clean:
+                    lines.append(s_clean)
+        _notify(progress, f"Split transcript into {len(lines)} sentences for alignment.")
+    else:
+        lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+
+    if not lines:
+        raise ValueError(f"The transcript file {text_path.name} is empty.")
+
+    _notify(progress, f"Loading and preprocessing audio: {audio_path.name}...")
+    waveform, sample_rate = _load_waveform(audio_path, sample_rate=16000)
+    duration_seconds = waveform.shape[-1] / sample_rate
+
+    # Safety: if audio is longer than 10 minutes, run on CPU to avoid GPU OOM
+    if duration_seconds > 600:
+        device = torch.device("cpu")
+        _notify(progress, f"Audio is long ({duration_seconds:.1f}s). Running alignment on CPU to prevent Out-Of-Memory...")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        _notify(progress, f"Running alignment on {device}...")
+
+    _notify(progress, f"Loading MMS Forced Alignment model...")
+    model = bundle.get_model(with_star=False).to(device)
+    tokenizer = bundle.get_tokenizer()
+    aligner = bundle.get_aligner()
+
+    waveform = waveform.to(device)
+
+    _notify(progress, f"Romanizing and cleaning transcript words...")
+    u = Uroman()
+    
+    line_word_maps = []
+    all_words = []
+    cleaned_words = []
+    
+    for line_idx, line in enumerate(lines):
+        line_text = re.sub(r"\s+", " ", line).strip()
+        if not line_text:
+            continue
+        words = line_text.split()
+        if not words:
+            continue
+        
+        start_idx = len(all_words)
+        for w in words:
+            all_words.append((w, line_text))
+            rom_w = u.romanize_string(w)
+            w_clean = rom_w.lower()
+            w_clean = re.sub("([^a-z' ])", "", w_clean).strip()
+            if not w_clean:
+                w_clean = "a"  # Fallback for punctuation-only words
+            cleaned_words.append(w_clean)
+        end_idx = len(all_words)
+        line_word_maps.append({
+            "line_idx": line_idx,
+            "text": line_text,
+            "start_word_idx": start_idx,
+            "end_word_idx": end_idx,
+        })
+
+    if not cleaned_words:
+        raise ValueError("No clean words found in transcript to align.")
+
+    _notify(progress, f"Tokenizing transcript...")
+    tokens = tokenizer(cleaned_words)
+
+    _notify(progress, f"Running acoustic model...")
+    with torch.inference_mode():
+        emission, _ = model(waveform)
+        emission = emission.squeeze(0)
+
+    _notify(progress, f"Computing forced alignment...")
+    try:
+        spans = aligner(emission, tokens)
+    except Exception as e:
+        raise RuntimeError(f"Forced alignment failed: {e}. Please check if the audio matches the text.")
+
+    frame_duration = 0.02
+    word_timestamps = []
+    for word_idx, span_list in enumerate(spans):
+        if not span_list:
+            word_timestamps.append((0.0, 0.0))
+            continue
+        w_start = span_list[0].start * frame_duration
+        w_end = span_list[-1].end * frame_duration
+        word_timestamps.append((w_start, w_end))
+
+    # Construct WebVTT lines
+    vtt_lines = ["WEBVTT\n"]
+    for mapping in line_word_maps:
+        start_w = mapping["start_word_idx"]
+        end_w = mapping["end_word_idx"]
+        
+        sentence_word_timestamps = word_timestamps[start_w:end_w]
+        valid_timestamps = [t for t in sentence_word_timestamps if t != (0.0, 0.0)]
+        
+        if valid_timestamps:
+            s_start = min(t[0] for t in valid_timestamps)
+            s_end = max(t[1] for t in valid_timestamps)
+        else:
+            s_start = (start_w / len(word_timestamps)) * duration_seconds
+            s_end = (end_w / len(word_timestamps)) * duration_seconds
+
+        if s_end <= s_start:
+            s_end = s_start + 1.0
+
+        start_str = format_timestamp(s_start)
+        end_str = format_timestamp(s_end)
+        
+        vtt_lines.append(f"{start_str} --> {end_str}\n{mapping['text']}\n")
+
+    _notify(progress, f"Writing WebVTT file to {output_vtt_path.name}...")
+    output_vtt_path.write_text("\n".join(vtt_lines) + "\n", encoding="utf-8")
+
+
 def prepare_dataset(
     *,
     output_root: str,
@@ -423,23 +595,90 @@ def prepare_dataset(
     diarize_speakers: bool = False,
     expected_speakers: int = 0,
     diarize_threshold: float = 0.3,
+    auto_split_sentences: bool = True,
     dataset_name: str = "LJSpeech-1.1",
     progress: ProgressCallback = None,
 ) -> dict[str, Any]:
-    resolved_audio_files = resolve_audio_files(audio_files, audio_dir)
-    if not resolved_audio_files:
-        raise ValueError("No audio files found. Provide files directly or point to a folder that contains audio.")
-
     output_root_path = _resolve_user_path(output_root, expect_directory=True)
     dataset_name = dataset_name or "LJSpeech-1.1"
     dataset_dir = output_root_path / "dataset" / dataset_name
     wavs_dir = dataset_dir / "wavs"
+
+    resolved_audio_files = resolve_audio_files(audio_files, audio_dir)
+    if not resolved_audio_files:
+        raise ValueError("No audio files found. Provide files directly or point to a folder that contains audio.")
     if dataset_dir.exists():
         shutil.rmtree(dataset_dir)
     wavs_dir.mkdir(parents=True, exist_ok=True)
 
-    transcript_map = _load_transcript_map(transcript_file)
-    use_whisper = not transcript_map
+    # Check if transcript_file is a VTT file or needs forced alignment globally
+    global_is_vtt = False
+    global_vtt_path = None
+    if transcript_file:
+        resolved_transcript_path = _resolve_user_path(transcript_file, must_exist=True, expect_directory=False)
+        suffix = resolved_transcript_path.suffix.lower()
+        if suffix == ".vtt":
+            global_is_vtt = True
+            global_vtt_path = resolved_transcript_path
+        elif suffix == ".txt":
+            is_mapping = False
+            try:
+                sample = resolved_transcript_path.read_text(encoding="utf-8", errors="ignore")[:4096]
+                lines_sample = [l.strip() for l in sample.splitlines() if l.strip()]
+                if lines_sample:
+                    for delim in ("|", "\t", ","):
+                        consistent = True
+                        has_delim_count = 0
+                        for line in lines_sample[:10]:
+                            if delim not in line:
+                                consistent = False
+                                break
+                            has_delim_count += 1
+                            part1 = line.split(delim, 1)[0].strip()
+                            if " " in part1 or part1.startswith(("“", "\"", "\x27", "‘")) or len(part1) > 100 or not part1:
+                                consistent = False
+                                break
+                        if consistent and has_delim_count > 0:
+                            is_mapping = True
+                            break
+            except Exception:
+                pass
+                
+            if not is_mapping:
+                temp_vtt_dir = output_root_path / "temp"
+                temp_vtt_dir.mkdir(parents=True, exist_ok=True)
+                global_vtt_path = temp_vtt_dir / f"{resolved_transcript_path.stem}_aligned.vtt"
+                
+                if len(resolved_audio_files) != 1:
+                    raise ValueError(
+                        f"Forced alignment requires exactly 1 audio file (e.g. the full audiobook chapter), "
+                        f"but found {len(resolved_audio_files)} audio files."
+                    )
+                
+                _notify(progress, f"Starting forced alignment between {Path(resolved_audio_files[0]).name} and {resolved_transcript_path.name}...")
+                align_audio_and_text_to_vtt(
+                    audio_path=Path(resolved_audio_files[0]),
+                    text_path=resolved_transcript_path,
+                    language=language,
+                    output_vtt_path=global_vtt_path,
+                    progress=progress,
+                    auto_split_sentences=auto_split_sentences,
+                )
+                global_is_vtt = True
+
+    transcript_map = {} if (global_is_vtt or not transcript_file) else _load_transcript_map(transcript_file)
+    
+    # Check if Whisper is needed for any of the files in the batch
+    use_whisper = False
+    if not transcript_file:
+        for audio_file in resolved_audio_files:
+            audio_path = Path(audio_file).expanduser().resolve()
+            if not audio_path.with_suffix(".vtt").exists() and not audio_path.with_suffix(".txt").exists():
+                use_whisper = True
+                break
+    else:
+        use_whisper = not transcript_map and not global_is_vtt
+
     asr_model: WhisperModel | None = None
     if use_whisper:
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -454,10 +693,136 @@ def prepare_dataset(
     for index, audio_file in enumerate(resolved_audio_files, start=1):
         audio_path = Path(audio_file).expanduser().resolve()
         _notify(progress, f"Processing {index}/{len(resolved_audio_files)}: {audio_path.name}")
-        waveform, sample_rate = _load_waveform(audio_path)
-        total_duration = waveform.shape[-1] / sample_rate
-        total_seconds += total_duration
         base_name = _safe_name(audio_path.stem)
+
+        # 1. Determine if VTT is available first (either passed directly or as a local file)
+        local_is_vtt = False
+        local_vtt_path = None
+        
+        if transcript_file:
+            if global_is_vtt:
+                local_is_vtt = True
+                local_vtt_path = global_vtt_path
+        else:
+            # Check for local files in the same directory with matching base name
+            vtt_cand = audio_path.with_suffix(".vtt")
+            txt_cand = audio_path.with_suffix(".txt")
+            if vtt_cand.exists():
+                local_is_vtt = True
+                local_vtt_path = vtt_cand
+                _notify(progress, f"Found local VTT transcript: {vtt_cand.name}")
+            elif txt_cand.exists():
+                _notify(progress, f"Found local TXT transcript: {txt_cand.name}. Starting forced alignment...")
+                temp_vtt_dir = output_root_path / "temp"
+                temp_vtt_dir.mkdir(parents=True, exist_ok=True)
+                local_vtt_path = temp_vtt_dir / f"{audio_path.stem}_aligned.vtt"
+                align_audio_and_text_to_vtt(
+                    audio_path=audio_path,
+                    text_path=txt_cand,
+                    language=language,
+                    output_vtt_path=local_vtt_path,
+                    progress=progress,
+                    auto_split_sentences=auto_split_sentences,
+                )
+                local_is_vtt = True
+            else:
+                _notify(progress, f"⚠️ No matching VTT or TXT found for {audio_path.name}. Whisper will be used to transcribe.")
+
+        # 2. Get audio metadata and optionally convert to temporary WAV for fast seeking
+        temp_wav_path = None
+        try:
+            if local_is_vtt and audio_path.suffix.lower() != ".wav":
+                temp_wav_dir = output_root_path / "temp"
+                temp_wav_dir.mkdir(parents=True, exist_ok=True)
+                temp_wav_path = temp_wav_dir / f"temp_seek_{base_name}.wav"
+                
+                _notify(progress, f"Converting {audio_path.name} to temporary WAV for fast O(1) seeking...")
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-i", str(audio_path),
+                    "-ac", "1",
+                    "-ar", str(DEFAULT_SAMPLE_RATE),
+                    str(temp_wav_path)
+                ]
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                search_path = temp_wav_path
+            else:
+                search_path = audio_path
+
+            # 3. Get audio metadata (sample rate and duration) without loading the full waveform if possible
+            try:
+                info = sf.info(str(search_path))
+                original_sample_rate = info.samplerate
+                original_num_frames = info.frames
+                total_duration = info.duration
+            except Exception:
+                try:
+                    info = torchaudio.info(str(search_path))
+                    original_sample_rate = info.sample_rate
+                    original_num_frames = info.num_frames
+                    total_duration = original_num_frames / original_sample_rate
+                except Exception:
+                    # Absolute fallback: load full waveform to get duration
+                    waveform, sample_rate = _load_waveform(search_path)
+                    original_sample_rate = sample_rate
+                    original_num_frames = waveform.shape[-1]
+                    total_duration = original_num_frames / original_sample_rate
+
+            total_seconds += total_duration
+
+            # 4. Memory-efficient slicing if VTT alignment exists (no full-audio loading)
+            if local_is_vtt:
+                _notify(progress, f"Slicing audio with VTT transcript file: {local_vtt_path.name}...")
+                vtt_content = local_vtt_path.read_text(encoding="utf-8", errors="ignore")
+                pattern = r"((?:\d{2}:)?\d{2}:\d{2}\.\d{3})\s+-->\s+((?:\d{2}:)?\d{2}:\d{2}\.\d{3})\n(.*?)(?=\n\n|\Z|\n\d|\n\[)"
+                matches = re.findall(pattern, vtt_content, re.DOTALL)
+                
+                for clip_index, (start_str, end_str, text_val) in enumerate(matches):
+                    def to_secs(t_str):
+                        parts = t_str.split(":")
+                        if len(parts) == 3:
+                            return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+                        elif len(parts) == 2:
+                            return float(parts[0]) * 60 + float(parts[1])
+                        return float(parts[0])
+                    
+                    sentence_start = max(to_secs(start_str) - segment_buffer_seconds, 0.0)
+                    clip_end = min(to_secs(end_str) + segment_buffer_seconds, total_duration)
+                    duration_seconds = clip_end - sentence_start
+                    sentence_text = re.sub(r"\s+", " ", text_val).strip()
+                    cleaned = _clean_text(sentence_text, language)
+                    
+                    if cleaned and duration_seconds >= min_segment_seconds:
+                        sample_id = f"{base_name}_{clip_index:08d}"
+                        destination = wavs_dir / f"{sample_id}.wav"
+                        start_frame = max(0, int(sentence_start * original_sample_rate))
+                        end_frame = min(original_num_frames, int(clip_end * original_sample_rate))
+                        num_frames_to_read = end_frame - start_frame
+                        
+                        if num_frames_to_read >= int(min_segment_seconds * original_sample_rate):
+                            clip = _read_waveform_slice(search_path, start_frame, num_frames_to_read, target_rate=DEFAULT_SAMPLE_RATE)
+                            if clip.shape[-1] >= int(min_segment_seconds * DEFAULT_SAMPLE_RATE):
+                                _save_waveform(destination, clip, DEFAULT_SAMPLE_RATE)
+                                entry = {
+                                    "id": sample_id,
+                                    "text": cleaned,
+                                    "original_text": sentence_text,
+                                    "audio_path": str(destination),
+                                    "duration_seconds": duration_seconds,
+                                }
+                                entries.append(entry)
+                                if longest_entry is None or duration_seconds > longest_entry["duration_seconds"]:
+                                    longest_entry = entry
+                continue
+
+            # 5. Only load the full waveform for non-VTT routes (e.g. Whisper transcription)
+            waveform, sample_rate = _load_waveform(search_path)
+        finally:
+            if temp_wav_path and temp_wav_path.exists():
+                try:
+                    temp_wav_path.unlink()
+                except Exception:
+                    pass
 
         if transcript_map:
             transcript = _lookup_transcript(audio_path, transcript_map)
@@ -490,6 +855,7 @@ def prepare_dataset(
             language=language,
             vad_filter=True,
             word_timestamps=True,
+            condition_on_previous_text=False,
         )
         words = _extract_transcribed_words(segments)
         if not words:
@@ -516,24 +882,41 @@ def prepare_dataset(
             cleaned = _clean_text(sentence_text, language)
             duration_seconds = clip_end - sentence_start
             if cleaned and duration_seconds >= min_segment_seconds:
-                sample_id = f"{base_name}_{clip_index:08d}"
-                destination = wavs_dir / f"{sample_id}.wav"
-                start_frame = max(0, int(sentence_start * sample_rate))
-                end_frame = min(waveform.shape[-1], int(clip_end * sample_rate))
-                clip = waveform[:, start_frame:end_frame]
-                if clip.shape[-1] >= int(min_segment_seconds * sample_rate):
-                    _save_waveform(destination, clip, sample_rate)
-                    entry = {
-                        "id": sample_id,
-                        "text": cleaned,
-                        "original_text": sentence_text,
-                        "audio_path": str(destination),
-                        "duration_seconds": duration_seconds,
-                    }
-                    entries.append(entry)
-                    if longest_entry is None or duration_seconds > longest_entry["duration_seconds"]:
-                        longest_entry = entry
-                    clip_index += 1
+                # Guard against Whisper hallucination loops & excessive speed
+                cps = len(cleaned) / duration_seconds if duration_seconds > 0 else 0
+                
+                def has_loops(text):
+                    w_list = text.lower().split()
+                    for idx in range(len(w_list) - 3):
+                        if w_list[idx] == w_list[idx+1] == w_list[idx+2]:
+                            return True
+                        if w_list[idx:idx+2] == w_list[idx+2:idx+4] == w_list[idx+4:idx+6]:
+                            return True
+                    return False
+
+                is_hallucination = cps > 28.0 or has_loops(cleaned)
+                
+                if not is_hallucination:
+                    sample_id = f"{base_name}_{clip_index:08d}"
+                    destination = wavs_dir / f"{sample_id}.wav"
+                    start_frame = max(0, int(sentence_start * sample_rate))
+                    end_frame = min(waveform.shape[-1], int(clip_end * sample_rate))
+                    clip = waveform[:, start_frame:end_frame]
+                    if clip.shape[-1] >= int(min_segment_seconds * sample_rate):
+                        _save_waveform(destination, clip, sample_rate)
+                        entry = {
+                            "id": sample_id,
+                            "text": cleaned,
+                            "original_text": sentence_text,
+                            "audio_path": str(destination),
+                            "duration_seconds": duration_seconds,
+                        }
+                        entries.append(entry)
+                        if longest_entry is None or duration_seconds > longest_entry["duration_seconds"]:
+                            longest_entry = entry
+                        clip_index += 1
+                else:
+                    _notify(progress, f"Filtered out segment due to Whisper loop/hallucination detection (CPS: {cps:.1f})")
             sentence_words = []
             sentence_start = None
 
@@ -795,18 +1178,90 @@ def _prepare_workspace(spec_key: str, dataset_dir: Path, training_root: Path) ->
     return workspace_root, recipe_target_dir / spec.train_script
 
 
-def _download_restore_path(spec_key: str, use_pretrained: bool, restore_path: str | None, progress: ProgressCallback) -> str | None:
+def _download_restore_path(spec_key: str, language: str, use_pretrained: bool, restore_path: str | None, pretrained_model_id: str | None, progress: ProgressCallback) -> str | None:
     spec = get_model_spec(spec_key)
+    if pretrained_model_id and (restore_path or not use_pretrained):
+        raise ValueError("Select either a local restore path or a pretrained model, and enable pretrained loading.")
+    choices = pretrained_model_choices(spec_key, language)
+    if pretrained_model_id and pretrained_model_id not in choices:
+        raise ValueError(f"{pretrained_model_id} is not a mapped {language} checkpoint for {spec.label}.")
     if restore_path:
         return str(_resolve_user_path(restore_path, must_exist=True, expect_directory=False))
     if spec.family == "xtts":
         _notify(progress, f"{spec.label} already downloads its official base checkpoint inside the recipe.")
         return None
-    if not use_pretrained or not spec.official_model_id:
+    if not use_pretrained or not choices:
+        if use_pretrained and not choices:
+            _notify(progress, f"No mapped {language} pretrained checkpoint for {spec.label}; training from scratch.")
         return None
-    _notify(progress, f"Downloading base checkpoint for {spec.label}...")
-    model_path, _, _ = ModelManager(progress_bar=True).download_model(spec.official_model_id)
+    model_id = pretrained_model_id or choices[0]
+    _notify(progress, f"Downloading base checkpoint {model_id} for {spec.label}...")
+    model_path, _, _ = ModelManager(progress_bar=True).download_model(model_id)
     return model_path
+
+
+def _resolve_xtts_base_model(spec_key: str) -> dict[str, str] | str:
+    """
+    Finds the 4 base model files for XTTS (v1 or v2) in the models directory.
+    If all 4 files are found, returns a dict with keys:
+      - 'dvae_checkpoint'
+      - 'mel_norm_file'
+      - 'tokenizer_file'
+      - 'xtts_checkpoint'
+    pointing to their absolute paths.
+    
+    If not found, returns the path of a shared folder to download them to.
+    """
+    version_str = "v2.0" if spec_key == "xtts_v2" else "v1.1"
+    folder_name = f"XTTS_{version_str}_original_model_files"
+    
+    # Determine the shared download path
+    if (_MODELS_DIR / "tts").is_dir():
+        shared_dir = _MODELS_DIR / "tts" / folder_name
+    else:
+        shared_dir = _MODELS_DIR / folder_name
+        
+    # List of candidate directories to search for existing files
+    candidates = []
+    
+    # Check if the shared directory already has them
+    candidates.append(shared_dir)
+    
+    # Check HuggingFace cache style folders under both models/ and models/tts/
+    hf_repo_name = "models--coqui--XTTS-v2" if spec_key == "xtts_v2" else "models--coqui--XTTS-v1"
+    for base in [_MODELS_DIR, _MODELS_DIR / "tts", _PROJECT_ROOT / "models"]:
+        hf_dir = base / hf_repo_name / "snapshots"
+        if hf_dir.is_dir():
+            try:
+                for sub in hf_dir.iterdir():
+                    if sub.is_dir():
+                        candidates.append(sub)
+            except Exception:
+                pass
+                
+    # Check simple folder candidates
+    for base in [_MODELS_DIR, _MODELS_DIR / "tts", _PROJECT_ROOT / "models"]:
+        candidates.append(base / folder_name)
+        
+    # Search candidates for the 4 required files
+    for cand in candidates:
+        if not cand.is_dir():
+            continue
+        dvae = cand / "dvae.pth"
+        mel = cand / "mel_stats.pth"
+        vocab = cand / "vocab.json"
+        model = cand / "model.pth"
+        if dvae.is_file() and mel.is_file() and vocab.is_file() and model.is_file():
+            return {
+                "dvae_checkpoint": str(dvae.resolve()),
+                "mel_norm_file": str(mel.resolve()),
+                "tokenizer_file": str(vocab.resolve()),
+                "xtts_checkpoint": str(model.resolve())
+            }
+            
+    # If not found, make sure the shared download directory exists and return it
+    shared_dir.mkdir(parents=True, exist_ok=True)
+    return str(shared_dir.resolve())
 
 
 def _patch_recipe_script(
@@ -820,15 +1275,28 @@ def _patch_recipe_script(
     grad_accum: int,
     max_audio_seconds: int,
     restore_path: str | None,
+    trusted_pretrained_restore: bool,
     extra_overrides: dict[str, Any],
     reference_wav: str,
 ) -> list[str]:
     source = script_path.read_text(encoding="utf-8")
+    if trusted_pretrained_restore:
+        # Some published Coqui checkpoints contain defaultdict metadata that
+        # Trainer's PyTorch 2.6+ weights-only loader cannot unpickle. This
+        # applies only to an official model ID downloaded above, never to an
+        # arbitrary user-supplied restore path.
+        source = source.replace(
+            "from trainer import Trainer, TrainerArgs",
+            "from trainer import Trainer, TrainerArgs\nimport trainer.io as _uft_trainer_io\n_uft_trainer_io._WEIGHTS_ONLY = False",
+            1,
+        )
     dataset_str = str(dataset_dir)
     wavs_str = str(dataset_dir / "wavs")
 
     source = _replace_literal(source, 'path=os.path.join(output_path, "../LJSpeech-1.1/")', f'path=r"{dataset_str}"')
+    source = _replace_literal(source, 'path=os.path.join("data", "LJSpeech-1.1/")', f'path=r"{dataset_str}"')
     source = _replace_literal(source, 'path="/raid/datasets/LJSpeech-1.1_24khz/"', f'path=r"{dataset_str}"')
+    source = _replace_literal(source, 'data_path = "/srv/data/"', f'data_path = r"{dataset_str}"')
     source = _replace_literal(
         source,
         'meta_file_train="/raid/datasets/LJSpeech-1.1_24khz/metadata.csv"',
@@ -847,13 +1315,27 @@ def _patch_recipe_script(
 
     source = _replace_keyword_value(source, "batch_size", str(batch_size))
     source = _replace_keyword_value(source, "eval_batch_size", str(batch_size))
+    # Tacotron's gradual schedule rewrites config.batch_size at epoch start.
+    # Keep its reduction-factor schedule while honoring the requested batch.
+    gradual_match = re.search(r"(?m)^\s*gradual_training\s*=\s*(\[[^\n]*\])\s*,", source)
+    if gradual_match:
+        gradual_schedule = ast.literal_eval(gradual_match.group(1))
+        for stage in gradual_schedule:
+            stage[2] = batch_size
+        source = source[:gradual_match.start(1)] + repr(gradual_schedule) + source[gradual_match.end(1):]
     source = _replace_keyword_value(source, "epochs", str(epochs))
     source = _replace_keyword_value(source, "BATCH_SIZE", str(batch_size))
     source = _replace_keyword_value(source, "GRAD_ACUMM_STEPS", str(grad_accum))
     source = _replace_keyword_value(source, "max_wav_length", str(int(max_audio_seconds * DEFAULT_SAMPLE_RATE)))
+    source = _replace_keyword_value(source, "max_audio_len", str(int(max_audio_seconds * DEFAULT_SAMPLE_RATE)))
     source = _replace_keyword_value(source, "num_loader_workers", "0")
     source = _replace_keyword_value(source, "num_eval_loader_workers", "0")
+    source = _replace_keyword_value(source, "precompute_num_workers", "0")
+    source = _replace_keyword_value(source, "gpu", "0")
     source = _replace_keyword_value(source, "mixed_precision", "False")
+    # A newly initialized model can produce invalid audio during Coqui's
+    # optional end-of-epoch synthesis. Keep training independent of that demo.
+    source = _replace_keyword_value(source, "test_delay_epochs", str(epochs))
 
     spec = get_model_spec(spec_key)
     # Patch for multilingual/scratch training on single-language models
@@ -864,11 +1346,36 @@ def _patch_recipe_script(
             source = source.replace(f'phoneme_language={q}en-us{q}', f'phoneme_language={q}{language}{q}')
 
     if spec_key.startswith("xtts_"):
+        # With START_WITH_EVAL=True the Trainer skips training in its first
+        # epoch. A one-epoch request would therefore run evaluation only.
+        source = _replace_keyword_value(source, "START_WITH_EVAL", "False")
+        if epochs == 1:
+            source = _replace_keyword_value(source, "save_step", "20")
         source = _replace_keyword_value(source, "language", repr(language))
         speaker_value = f'SPEAKER_REFERENCE = [r"{reference_wav}"]'
         source = re.sub(r"SPEAKER_REFERENCE\s*=\s*\[[^\]]*\]", speaker_value, source, count=1, flags=re.DOTALL)
         if restore_path:
             source = _replace_keyword_value(source, "XTTS_CHECKPOINT", repr(restore_path))
+            
+        # Resolve base model files to avoid duplicate downloads and grab from ebook2audiobook/models
+        resolved = _resolve_xtts_base_model(spec_key)
+        if isinstance(resolved, dict):
+            # We found the files in the cache or some candidate folder, point directly to them
+            source = _replace_literal(source, 'DVAE_CHECKPOINT = os.path.join(CHECKPOINTS_OUT_PATH, os.path.basename(DVAE_CHECKPOINT_LINK))', f'DVAE_CHECKPOINT = r"{resolved["dvae_checkpoint"]}"')
+            source = _replace_literal(source, 'DVAE_CHECKPOINT = os.path.join(CHECKPOINTS_OUT_PATH, DVAE_CHECKPOINT_LINK.split("/")[-1])', f'DVAE_CHECKPOINT = r"{resolved["dvae_checkpoint"]}"')
+            
+            source = _replace_literal(source, 'MEL_NORM_FILE = os.path.join(CHECKPOINTS_OUT_PATH, os.path.basename(MEL_NORM_LINK))', f'MEL_NORM_FILE = r"{resolved["mel_norm_file"]}"')
+            source = _replace_literal(source, 'MEL_NORM_FILE = os.path.join(CHECKPOINTS_OUT_PATH, MEL_NORM_LINK.split("/")[-1])', f'MEL_NORM_FILE = r"{resolved["mel_norm_file"]}"')
+            
+            source = _replace_literal(source, 'TOKENIZER_FILE = os.path.join(CHECKPOINTS_OUT_PATH, os.path.basename(TOKENIZER_FILE_LINK))', f'TOKENIZER_FILE = r"{resolved["tokenizer_file"]}"')
+            source = _replace_literal(source, 'TOKENIZER_FILE = os.path.join(CHECKPOINTS_OUT_PATH, TOKENIZER_FILE_LINK.split("/")[-1])', f'TOKENIZER_FILE = r"{resolved["tokenizer_file"]}"')
+            
+            source = _replace_literal(source, 'XTTS_CHECKPOINT = os.path.join(CHECKPOINTS_OUT_PATH, os.path.basename(XTTS_CHECKPOINT_LINK))', f'XTTS_CHECKPOINT = r"{resolved["xtts_checkpoint"]}"')
+            source = _replace_literal(source, 'XTTS_CHECKPOINT = os.path.join(CHECKPOINTS_OUT_PATH, XTTS_CHECKPOINT_LINK.split("/")[-1])', f'XTTS_CHECKPOINT = r"{resolved["xtts_checkpoint"]}"')
+        else:
+            # We didn't find the files, point CHECKPOINTS_OUT_PATH to the shared directory so they download there and can be reused next time
+            source = _replace_literal(source, 'CHECKPOINTS_OUT_PATH = os.path.join(OUT_PATH, "XTTS_v2.0_original_model_files/")', f'CHECKPOINTS_OUT_PATH = r"{resolved}"')
+            source = _replace_literal(source, 'CHECKPOINTS_OUT_PATH = os.path.join(OUT_PATH, "XTTS_v1.1_original_model_files/")', f'CHECKPOINTS_OUT_PATH = r"{resolved}"')
     elif restore_path:
         if "restore_path=None" in source:
             source = source.replace("restore_path=None", f"restore_path=r\"{restore_path}\"", 1)
@@ -876,6 +1383,17 @@ def _patch_recipe_script(
             source = source.replace("TrainerArgs()", f"TrainerArgs(restore_path=r\"{restore_path}\")", 1)
 
     source, unused = _apply_source_overrides(source, extra_overrides)
+    fit_pattern = re.compile(r"^(?P<indent>[ \t]*)trainer\.fit\(\)", re.MULTILINE)
+    if not fit_pattern.search(source):
+        raise ValueError(f"Recipe for {spec_key} has no trainer.fit() call to verify training.")
+    source = fit_pattern.sub(
+        lambda match: match.group(0)
+        + "\n"
+        + match.group("indent")
+        + 'print(f"UFT_TRAINING_STEPS={trainer.total_steps_done}", flush=True)',
+        source,
+        count=1,
+    )
     script_path.write_text(source, encoding="utf-8")
     return unused
 
@@ -978,15 +1496,71 @@ def _finalize_training_artifacts(
 
     if spec.family == "xtts":
         vocab = _latest_matching_file(workspace_root, ["vocab.json"])
+        if not vocab:
+            # Fallback: search in resolved base model
+            resolved = _resolve_xtts_base_model(spec_key)
+            if isinstance(resolved, dict) and "tokenizer_file" in resolved:
+                vocab = Path(resolved["tokenizer_file"])
+        if not vocab:
+            raise FileNotFoundError("XTTS training completed but vocab.json was not found.")
+
         speaker = _latest_matching_file(workspace_root, ["speakers_xtts.pth"])
-        if not vocab or not speaker:
-            raise FileNotFoundError("XTTS training completed but vocab.json or speakers_xtts.pth was not found.")
+        if not speaker:
+            # Search candidate directories for speakers_xtts.pth
+            resolved = _resolve_xtts_base_model(spec_key)
+            if isinstance(resolved, dict) and "xtts_checkpoint" in resolved:
+                cand = Path(resolved["xtts_checkpoint"]).parent / "speakers_xtts.pth"
+                if cand.is_file():
+                    speaker = cand
+            if not speaker:
+                # Search all snapshots and shared folders
+                hf_repo_name = "models--coqui--XTTS-v2" if spec_key == "xtts_v2" else "models--coqui--XTTS-v1"
+                version_str = "v2.0" if spec_key == "xtts_v2" else "v1.1"
+                folder_name = f"XTTS_{version_str}_original_model_files"
+                for base in [_MODELS_DIR, _MODELS_DIR / "tts", _PROJECT_ROOT / "models"]:
+                    # Check folder_name
+                    cand = base / folder_name / "speakers_xtts.pth"
+                    if cand.is_file():
+                        speaker = cand
+                        break
+                    # Check snapshots
+                    hf_dir = base / hf_repo_name / "snapshots"
+                    if hf_dir.is_dir():
+                        try:
+                            for sub in hf_dir.iterdir():
+                                if sub.is_dir():
+                                    cand = sub / "speakers_xtts.pth"
+                                    if cand.is_file():
+                                        speaker = cand
+                                        break
+                        except Exception:
+                            pass
+                    if speaker:
+                        break
+            if not speaker:
+                # Download it to models/tts
+                _notify(None, "speakers_xtts.pth not found locally. Downloading base speaker file...")
+                try:
+                    import urllib.request
+                    version_str = "v2.0" if spec_key == "xtts_v2" else "v1.1"
+                    dest_dir = (_MODELS_DIR / "tts") if (_MODELS_DIR / "tts").is_dir() else _MODELS_DIR
+                    dest_path = dest_dir / f"XTTS_{version_str}_original_model_files" / "speakers_xtts.pth"
+                    dest_path.parent.mkdir(parents=True, exist_ok=True)
+                    url = f"https://coqui.gateway.scarf.sh/hf-coqui/XTTS-{'v2' if spec_key == 'xtts_v2' else 'v1'}/main/speakers_xtts.pth"
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req, timeout=15) as response:
+                        dest_path.write_bytes(response.read())
+                    speaker = dest_path
+                except Exception as dl_err:
+                    _notify(None, f"Warning: Failed to download optional speakers_xtts.pth: {dl_err}")
+
         ready_vocab = ready_dir / "vocab.json"
-        ready_speaker = ready_dir / "speakers_xtts.pth"
         shutil.copy2(vocab, ready_vocab)
-        shutil.copy2(speaker, ready_speaker)
         artifacts["vocab"] = str(ready_vocab)
-        artifacts["speaker_file"] = str(ready_speaker)
+        if speaker:
+            ready_speaker = ready_dir / "speakers_xtts.pth"
+            shutil.copy2(speaker, ready_speaker)
+            artifacts["speaker_file"] = str(ready_speaker)
 
     artifacts_path = ready_dir / "artifacts.json"
     artifacts_path.write_text(json.dumps(_json_ready(artifacts), indent=2), encoding="utf-8")
@@ -1023,6 +1597,7 @@ def train_model(
     max_audio_seconds: int = 11,
     restore_path: str | None = None,
     use_pretrained: bool = True,
+    pretrained_model_id: str | None = None,
     extra_overrides_json: str | None = None,
     dry_run: bool = False,
     progress: ProgressCallback = None,
@@ -1031,6 +1606,9 @@ def train_model(
     sample_text: str = "",
 ) -> dict[str, Any]:
     spec = get_model_spec(model_key)
+    language = normalize_language(language)
+    if spec.family == "xtts" and not pretrained_model_choices(model_key, language):
+        raise ValueError(f"{spec.label} does not support language {language}.")
     dataset_root = _normalize_dataset_dir(dataset_dir, output_root)
     dataset_info = load_dataset_info(str(dataset_root))
     output_root_path = _resolve_user_path(output_root, expect_directory=True)
@@ -1039,6 +1617,8 @@ def train_model(
     training_root.mkdir(parents=True, exist_ok=True)
 
     if model_key == "piper":
+        if pretrained_model_id and (restore_path or not use_pretrained):
+            raise ValueError("Select either a local Piper restore path or a pretrained checkpoint, and enable pretrained loading.")
         from utils.piper_utils import (
             ensure_monotonic_align_compiled,
             resolve_piper_checkpoint,
@@ -1051,6 +1631,7 @@ def train_model(
         
         # Resolve and download pretrained checkpoint if applicable
         base_ckpt_path = None
+        base_checkpoint_id = ""
         config_path = None
         quality = "medium"
         sample_rate = 22050
@@ -1076,7 +1657,8 @@ def train_model(
                 espeak_language = ckpt_config.get("espeak", {}).get("voice") or ckpt_config.get("language", {}).get("code") or espeak_language
         elif use_pretrained:
             _notify(progress, f"Resolving Piper checkpoint for language: {language}...")
-            checkpoint_info = resolve_piper_checkpoint(language)
+            checkpoint_info = resolve_piper_checkpoint(language, checkpoint_id=pretrained_model_id)
+            base_checkpoint_id = checkpoint_info["id"]
             _notify(progress, f"Downloading checkpoint: {checkpoint_info['voice']} ({checkpoint_info['quality']})")
             base_ckpt_path, config_path = download_piper_checkpoint(checkpoint_info, progress)
 
@@ -1099,6 +1681,7 @@ def train_model(
             "preprocessed_dir": str(preprocessed_dir),
             "dataset_dir": str(dataset_root),
             "base_checkpoint": str(base_ckpt_path) if base_ckpt_path else "",
+            "pretrained_model_id": base_checkpoint_id,
             "base_config": str(config_path),
             "espeak_language": espeak_language,
             "sample_rate": sample_rate,
@@ -1113,7 +1696,8 @@ def train_model(
         preprocess_piper_dataset(dataset_root, preprocessed_dir, espeak_language, sample_rate)
         
         # 2. Overwrite configuration with base checkpoint's config
-        shutil.copy2(config_path, preprocessed_dir / "config.json")
+        if config_path.resolve() != (preprocessed_dir / "config.json").resolve():
+            shutil.copy2(config_path, preprocessed_dir / "config.json")
         
         # 3. Train the model
         _notify(progress, f"Training Piper model for {epochs} epochs...")
@@ -1168,6 +1752,7 @@ def train_model(
             "config": str(ready_onnx) + ".json",
             "reference_wav": "",
             "log_path": str(log_path),
+            "pretrained_model_id": base_checkpoint_id,
             "unused_overrides": {},
         }
         artifacts_path = ready_dir / "artifacts.json"
@@ -1175,7 +1760,7 @@ def train_model(
         artifacts["artifacts_file"] = str(artifacts_path)
         return artifacts
 
-    computed_restore_path = _download_restore_path(model_key, use_pretrained, restore_path, progress)
+    computed_restore_path = _download_restore_path(model_key, language, use_pretrained, restore_path, pretrained_model_id, progress)
     extra_overrides = json.loads(extra_overrides_json) if extra_overrides_json else {}
     if extra_overrides_json and not isinstance(extra_overrides, dict):
         raise ValueError("extra_overrides_json must be a JSON object.")
@@ -1192,10 +1777,13 @@ def train_model(
         grad_accum=grad_accum,
         max_audio_seconds=max_audio_seconds,
         restore_path=computed_restore_path,
+        trusted_pretrained_restore=bool(use_pretrained and not restore_path and computed_restore_path),
         extra_overrides=extra_overrides,
         reference_wav=str(reference_wav) if reference_wav else "",
     )
 
+    matching_models = pretrained_model_choices(model_key, language)
+    selected_pretrained_id = (pretrained_model_id or matching_models[0]) if use_pretrained and not restore_path and matching_models else ""
     run_summary = {
         "model_key": spec.key,
         "model_label": spec.label,
@@ -1204,6 +1792,7 @@ def train_model(
         "dataset_dir": str(dataset_root),
         "script_path": str(script_path),
         "restore_path": computed_restore_path or "",
+        "pretrained_model_id": selected_pretrained_id,
         "unused_overrides": unused_overrides,
     }
     if dry_run:
@@ -1245,6 +1834,13 @@ def train_model(
             f"Training failed for {spec.label}. See {log_path}\n\n"
             f"LOGS:\n{_tail_text(full_log, ERROR_LOG_TAIL_CHARS)}"
         )
+    step_matches = re.findall(r"^UFT_TRAINING_STEPS=(\d+)$", full_log, re.MULTILINE)
+    trained_steps = int(step_matches[-1]) if step_matches else 0
+    if trained_steps < 1:
+        raise RuntimeError(
+            f"Training finished for {spec.label} without a confirmed optimizer step. "
+            f"See {log_path}\n\nLOGS:\n{_tail_text(full_log, ERROR_LOG_TAIL_CHARS)}"
+        )
     artifacts = _finalize_training_artifacts(
         spec_key=model_key,
         training_root=training_root,
@@ -1252,7 +1848,13 @@ def train_model(
         reference_wav=str(reference_wav) if reference_wav else "",
     )
     artifacts["log_path"] = str(log_path)
+    artifacts["trained_steps"] = trained_steps
+    artifacts["pretrained_model_id"] = run_summary["pretrained_model_id"]
     artifacts["unused_overrides"] = unused_overrides
+    Path(artifacts["artifacts_file"]).write_text(
+        json.dumps(_json_ready({key: value for key, value in artifacts.items() if key != "artifacts_file"}), indent=2),
+        encoding="utf-8",
+    )
     return artifacts
 
 
@@ -1303,7 +1905,7 @@ def _load_xtts_runtime(artifacts: dict[str, Any]) -> Xtts:
         config,
         checkpoint_path=artifacts["checkpoint"],
         vocab_path=artifacts["vocab"],
-        speaker_file_path=artifacts["speaker_file"],
+        speaker_file_path=artifacts.get("speaker_file"),
         use_deepspeed=False,
     )
     if torch.cuda.is_available():

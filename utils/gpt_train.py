@@ -7,12 +7,17 @@ from trainer import Trainer, TrainerArgs
 
 from TTS.config.shared_configs import BaseDatasetConfig
 from TTS.tts.datasets import load_tts_samples
-from TTS.tts.layers.xtts.trainer.gpt_trainer import GPTArgs, GPTTrainer, GPTTrainerConfig, XttsAudioConfig
+try:
+    from TTS.tts.layers.xtts.trainer.gpt_trainer import GPTArgs, GPTTrainer, GPTTrainerConfig, XttsAudioConfig
+except ImportError:
+    from TTS.tts.layers.xtts.trainer.gpt_trainer import GPTArgs, GPTTrainer, GPTTrainerConfig
+    from TTS.tts.configs.xtts_config import XttsAudioConfig
 from TTS.utils.manage import ModelManager
 import shutil
+from utils.model_paths import get_models_dir
 
 
-def train_gpt(custom_model,version, language, num_epochs, batch_size, grad_acumm, train_csv, eval_csv, output_path, max_audio_length=255995):
+def train_gpt(custom_model:str|Path|None, version:str, language:str, num_epochs:int, batch_size:int, grad_acumm:int, train_csv:str, eval_csv:str, output_path:str, max_audio_length:int=255995)->tuple[str,str,str,str,str,str]:
     #  Logging parameters
     RUN_NAME = "GPT_XTTS_FT"
     PROJECT_NAME = "XTTS_trainer"
@@ -45,7 +50,7 @@ def train_gpt(custom_model,version, language, num_epochs, batch_size, grad_acumm
     DATASETS_CONFIG_LIST = [config_dataset]
 
     # Define the path where XTTS v2.0.1 files will be downloaded
-    CHECKPOINTS_OUT_PATH = os.path.join(Path.cwd(), "base_models",f"{version}")
+    CHECKPOINTS_OUT_PATH = os.fspath(get_models_dir() / 'xtts' / 'base_models' / version)
     os.makedirs(CHECKPOINTS_OUT_PATH, exist_ok=True)
 
 
@@ -174,12 +179,31 @@ def train_gpt(custom_model,version, language, num_epochs, batch_size, grad_acumm
     model = GPTTrainer.init_from_config(config)
 
     # load training samples
-    train_samples, eval_samples = load_tts_samples(
-        DATASETS_CONFIG_LIST,
-        eval_split=True,
-        eval_split_max_size=config.eval_split_max_size,
-        eval_split_size=config.eval_split_size,
-    )
+    try:
+        train_samples, eval_samples = load_tts_samples(
+            DATASETS_CONFIG_LIST,
+            eval_split=True,
+            eval_split_max_size=config.eval_split_max_size,
+            eval_split_size=config.eval_split_size,
+        )
+    except AssertionError as e:
+        if "You do not have enough samples for the evaluation set" in str(e):
+            total_samples = load_tts_samples(DATASETS_CONFIG_LIST, eval_split=False)
+            num_samples = len(total_samples)
+            if num_samples > 0:
+                new_eval_split_size = 1.0 / num_samples
+                print(f" > Recalculating eval_split_size to {new_eval_split_size} (at least 1 evaluation sample)")
+                config.eval_split_size = new_eval_split_size
+                train_samples, eval_samples = load_tts_samples(
+                    DATASETS_CONFIG_LIST,
+                    eval_split=True,
+                    eval_split_max_size=config.eval_split_max_size,
+                    eval_split_size=config.eval_split_size,
+                )
+            else:
+                raise e
+        else:
+            raise e
 
     # init the trainer and 🚀
     trainer = Trainer(

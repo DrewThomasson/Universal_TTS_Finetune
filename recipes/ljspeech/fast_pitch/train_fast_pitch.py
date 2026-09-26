@@ -54,6 +54,7 @@ config = FastPitchConfig(
     print_step=50,
     print_eval=False,
     mixed_precision=False,
+    min_seq_len=13,
     max_seq_len=500000,
     output_path=output_path,
     datasets=[dataset_config],
@@ -83,12 +84,49 @@ tokenizer, config = TTSTokenizer.init_from_config(config)
 # You can define your custom sample loader returning the list of samples.
 # Or define your custom formatter and pass it to the `load_tts_samples`.
 # Check `TTS.tts.datasets.load_tts_samples` for more details.
-train_samples, eval_samples = load_tts_samples(
-    dataset_config,
-    eval_split=True,
-    eval_split_max_size=config.eval_split_max_size,
-    eval_split_size=config.eval_split_size,
-)
+try:
+    train_samples, eval_samples = load_tts_samples(
+        dataset_config,
+        eval_split=True,
+        eval_split_max_size=config.eval_split_max_size,
+        eval_split_size=config.eval_split_size,
+    )
+except AssertionError as e:
+    if "You do not have enough samples for the evaluation set" in str(e):
+        total_samples = load_tts_samples(dataset_config, eval_split=False)
+        num_samples = len(total_samples)
+        if num_samples > 0:
+            new_eval_split_size = 1.0 / num_samples
+            print(f" > Recalculating eval_split_size to {new_eval_split_size} (at least 1 evaluation sample)")
+            config.eval_split_size = new_eval_split_size
+            train_samples, eval_samples = load_tts_samples(
+                dataset_config,
+                eval_split=True,
+                eval_split_max_size=config.eval_split_max_size,
+                eval_split_size=config.eval_split_size,
+            )
+        else:
+            raise e
+    else:
+        raise e
+
+# Filter by actual phoneme token length (min_seq_len in config only checks character count,
+# but the encoder kernel_size=13 requires ≥13 PHONEME tokens or it crashes at runtime).
+_ENCODER_KERNEL_SIZE = 13
+
+def _phoneme_len_ok(sample):
+    try:
+        ids = tokenizer.text_to_ids(sample["text"], sample.get("language", None))
+        return len(ids) >= _ENCODER_KERNEL_SIZE
+    except Exception:
+        return True  # keep sample if we can't check
+
+_before = len(train_samples) + len(eval_samples)
+train_samples = [s for s in train_samples if _phoneme_len_ok(s)]
+eval_samples  = [s for s in eval_samples  if _phoneme_len_ok(s)]
+_after = len(train_samples) + len(eval_samples)
+if _before != _after:
+    print(f" > Dropped {_before - _after} sample(s) whose phoneme sequence was shorter than encoder kernel_size={_ENCODER_KERNEL_SIZE}")
 
 # init the model
 model = ForwardTTS(config, ap, tokenizer, speaker_manager=None)

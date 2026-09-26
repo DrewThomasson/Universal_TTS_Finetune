@@ -7,7 +7,12 @@ import urllib.request
 import json
 import subprocess
 from pathlib import Path
+from functools import lru_cache
 import torch
+
+from utils.model_paths import get_models_dir
+_MODELS_DIR = get_models_dir()
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 def ensure_monotonic_align_compiled():
     """Auto-compiles the monotonic_align Cython extension for Piper training if not already compiled."""
@@ -42,109 +47,99 @@ def ensure_monotonic_align_compiled():
     except Exception as e:
         print(f"Warning: Failed to compile monotonic_align Cython extension: {e}. Training might be slow or fail.")
 
-def resolve_piper_checkpoint(language: str, quality: str = "medium") -> dict[str, str]:
-    """Resolves the pre-trained checkpoint for a given language code.
-    Tries HF API dynamically, falling back to a static catalog of common models.
-    """
-    lang = language.split("-")[0].split("_")[0].lower() # Normalize code (e.g. en-US -> en)
-    
-    # Static catalog mapping standard languages to reliable pre-trained models
-    static_fallbacks = {
-        "en": {
-            "lang": "en",
-            "locale": "en_US",
-            "voice": "lessac",
-            "quality": "medium",
-            "ckpt": "epoch=2164-step=1355540.ckpt",
-            "config": "config.json"
-        },
-        "es": {
-            "lang": "es",
-            "locale": "es_ES",
-            "voice": "davefx",
-            "quality": "medium",
-            "ckpt": "epoch=5629-step=1605020.ckpt",
-            "config": "config.json"
-        },
-        "de": {
-            "lang": "de",
-            "locale": "de_DE",
-            "voice": "thorsten",
-            "quality": "medium",
-            "ckpt": "epoch=3135-step=2702056.ckpt",
-            "config": "config.json"
-        },
-        "fr": {
-            "lang": "fr",
-            "locale": "fr_FR",
-            "voice": "siwis",
-            "quality": "medium",
-            "ckpt": "epoch=3304-step=2050940.ckpt",
-            "config": "config.json"
-        }
+def get_voices_json_languages() -> set[str]:
+    """Retrieves all language codes and families supported by pre-built Piper models in voices.json."""
+    paths = [
+        _PROJECT_ROOT / "voices.json",
+        _PROJECT_ROOT / "piper" / "piper" / "voices.json"
+    ]
+    langs = set()
+    for path in paths:
+        if path.exists():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    for voice in data.values():
+                        lang_info = voice.get("language", {})
+                        if "code" in lang_info:
+                            code = lang_info["code"].lower()
+                            langs.add(code)
+                            langs.add(code.replace("_", "-"))
+                        if "family" in lang_info:
+                            langs.add(lang_info["family"].lower())
+            except Exception:
+                pass
+    return langs
+
+# Used when Hugging Face cannot be reached. These entries are training
+# checkpoints, not the ready-to-synthesize ONNX voices in voices.json.
+_STATIC_CHECKPOINTS = {
+    "en": ("en_US", "lessac", "medium", "epoch=2164-step=1355540.ckpt"),
+    "es": ("es_ES", "davefx", "medium", "epoch=5629-step=1605020.ckpt"),
+    "de": ("de_DE", "thorsten", "medium", "epoch=3135-step=2702056.ckpt"),
+    "fr": ("fr_FR", "siwis", "medium", "epoch=3304-step=2050940.ckpt"),
+}
+
+
+def _piper_checkpoint_info(lang: str, locale: str, voice: str, quality: str, ckpt: str) -> dict[str, str]:
+    return {
+        "id": f"piper:{lang}/{locale}/{voice}/{quality}",
+        "lang": lang,
+        "locale": locale,
+        "voice": voice,
+        "quality": quality,
+        "ckpt": ckpt,
+        "config": "config.json",
     }
-    
+
+
+@lru_cache(maxsize=64)
+def list_piper_checkpoint_choices(language: str) -> tuple[dict[str, str], ...]:
+    """List actual training checkpoints for one language without downloading weights."""
+    lang = language.split("-")[0].split("_")[0].lower()
+    url = f"https://huggingface.co/api/datasets/rhasspy/piper-checkpoints/tree/main/{lang}?recursive=true"
     try:
-        # Tries to query Hugging Face API dynamically
-        api_url = f"https://huggingface.co/api/datasets/rhasspy/piper-checkpoints/tree/main/{lang}"
-        req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=5) as response:
-            locales = json.loads(response.read().decode())
-            if locales and isinstance(locales, list):
-                # Select first locale (e.g. en/en_US)
-                locale_path = locales[0]["path"]
-                
-                # Query locale directory for voices
-                voice_url = f"https://huggingface.co/api/datasets/rhasspy/piper-checkpoints/tree/main/{locale_path}"
-                with urllib.request.urlopen(urllib.request.Request(voice_url, headers={'User-Agent': 'Mozilla/5.0'}), timeout=5) as res:
-                    voices = json.loads(res.read().decode())
-                    if voices and isinstance(voices, list):
-                        voice_path = voices[0]["path"]
-                        
-                        # Query voice directory for qualities
-                        quality_url = f"https://huggingface.co/api/datasets/rhasspy/piper-checkpoints/tree/main/{voice_path}"
-                        with urllib.request.urlopen(urllib.request.Request(quality_url, headers={'User-Agent': 'Mozilla/5.0'}), timeout=5) as r:
-                            qualities = json.loads(r.read().decode())
-                            
-                            # Attempt to find the requested quality or take first
-                            selected_quality_path = None
-                            for q in qualities:
-                                if q["path"].endswith(quality):
-                                    selected_quality_path = q["path"]
-                                    break
-                            if not selected_quality_path and qualities:
-                                selected_quality_path = qualities[0]["path"]
-                                
-                            if selected_quality_path:
-                                # Query selected quality directory for files
-                                files_url = f"https://huggingface.co/api/datasets/rhasspy/piper-checkpoints/tree/main/{selected_quality_path}"
-                                with urllib.request.urlopen(urllib.request.Request(files_url, headers={'User-Agent': 'Mozilla/5.0'}), timeout=5) as rf:
-                                    files = json.loads(rf.read().decode())
-                                    ckpt_file = None
-                                    config_file = "config.json"
-                                    for f in files:
-                                        if f["path"].endswith(".ckpt"):
-                                            ckpt_file = Path(f["path"]).name
-                                    
-                                    if ckpt_file:
-                                        parts = selected_quality_path.split("/")
-                                        return {
-                                            "lang": lang,
-                                            "locale": parts[1] if len(parts) > 1 else "",
-                                            "voice": parts[2] if len(parts) > 2 else "",
-                                            "quality": parts[3] if len(parts) > 3 else quality,
-                                            "ckpt": ckpt_file,
-                                            "config": config_file
-                                        }
-    except Exception as e:
-        print(f"HF API resolution failed ({e}). Falling back to static mappings.")
-        
-    # Return matched static config, or fallback to English lessac
-    if lang in static_fallbacks:
-        return static_fallbacks[lang]
-    else:
-        print(f"Language '{lang}' has no pre-trained checkpoint. Defaulting to English (en_US/lessac) as base model.")
-        return static_fallbacks["en"]
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            files = json.load(response)
+        paths = {item["path"] for item in files if item.get("type") == "file"}
+        choices_by_id = {}
+        for path in sorted(paths):
+            parts = path.split("/")
+            if len(parts) != 5 or not path.endswith(".ckpt"):
+                continue
+            _, locale, voice, quality, ckpt = parts
+            if f"{lang}/{locale}/{voice}/{quality}/config.json" in paths:
+                info = _piper_checkpoint_info(lang, locale, voice, quality, ckpt)
+                choices_by_id[info["id"]] = info
+        if choices_by_id:
+            return tuple(choices_by_id.values())
+    except Exception as exc:
+        print(f"Piper checkpoint catalog unavailable for {lang}: {exc}")
+    if lang in _STATIC_CHECKPOINTS:
+        return (_piper_checkpoint_info(lang, *_STATIC_CHECKPOINTS[lang]),)
+    return ()
+
+
+def resolve_piper_checkpoint(language: str, quality: str = "medium", checkpoint_id: str | None = None) -> dict[str, str]:
+    """Resolve an exact Piper training checkpoint in the selected language."""
+    lang = language.split("-")[0].split("_")[0].lower()
+    choices = list_piper_checkpoint_choices(language)
+    if checkpoint_id:
+        for choice in choices:
+            if choice["id"] == checkpoint_id:
+                return choice
+        raise ValueError(f"{checkpoint_id} is not an available {lang} Piper training checkpoint.")
+    if not choices:
+        raise LookupError(f"No Piper training checkpoint is available for {lang}.")
+    preferred_voice = _STATIC_CHECKPOINTS.get(lang, ("",))[1] if lang in _STATIC_CHECKPOINTS else None
+    for choice in choices:
+        if choice["quality"] == quality and choice["voice"] == preferred_voice:
+            return choice
+    for choice in choices:
+        if choice["quality"] == quality:
+            return choice
+    return choices[0]
 
 def download_piper_checkpoint(checkpoint_info: dict[str, str], progress_callback=None) -> tuple[Path, Path]:
     """Downloads checkpoint ckpt and config files locally into models/piper/checkpoints/."""
@@ -157,7 +152,7 @@ def download_piper_checkpoint(checkpoint_info: dict[str, str], progress_callback
     
     base_url = f"https://huggingface.co/datasets/rhasspy/piper-checkpoints/resolve/main/{lang}/{locale}/{voice}/{quality}"
     
-    local_dir = Path(__file__).resolve().parent.parent / "models" / "piper" / "checkpoints" / lang / locale / voice / quality
+    local_dir = _MODELS_DIR / "piper" / "checkpoints" / lang / locale / voice / quality
     local_dir.mkdir(parents=True, exist_ok=True)
     
     ckpt_path = local_dir / ckpt_filename

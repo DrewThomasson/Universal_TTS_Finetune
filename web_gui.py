@@ -48,6 +48,7 @@ from utils.pipeline import (
     pause_training,
     resume_training,
 )
+from utils.model_registry import pretrained_model_choices
 
 LANGUAGE_CHOICES = [
     "en",
@@ -62,12 +63,16 @@ LANGUAGE_CHOICES = [
     "nl",
     "cs",
     "ar",
-    "zh",
+    "zh-cn",
     "hu",
     "ko",
     "ja",
+    "hi",
+    "bg", "da", "et", "ga", "uk", "fa", "be", "el", "fi",
+    "hr", "lt", "lv", "mt", "ro", "sk", "sl", "sr", "sv", "ca",
+    "cy", "is", "ka", "kk", "lb", "ne", "no", "sw", "ur", "vi",
 ]
-WHISPER_CHOICES = ["large-v3", "large-v2", "large", "medium", "small", "base"]
+WHISPER_CHOICES = ["large-v3", "large-v2", "large", "distil-large-v3", "distil-large-v2", "medium", "medium.en", "small", "small.en", "base", "base.en", "tiny", "tiny.en"]
 MODEL_CHOICES = [(label, key) for key, label in dropdown_choices()]
 
 
@@ -252,7 +257,7 @@ def update_dataset_choices(out_root: str | None) -> gr.Dropdown:
 
 def update_trained_models(out_root: str | None, model_key: str | None) -> gr.Dropdown:
     choices = list_trained_models(out_root, model_key)
-    val = choices[0][1] if choices else ""
+    val = choices[0][1] if choices else None
     return gr.update(choices=choices, value=val)
 
 
@@ -317,9 +322,30 @@ def _clean_audio_path(path_val):
     return None
 
 
-def preprocess_dataset(audio_files, audio_dir, transcript_file, language, whisper_model, out_path, dataset_name, diarize_speakers, expected_speakers=0, diarize_threshold=0.3, progress=gr.Progress()):
+def preprocess_dataset(
+    audio_files, audio_dir, transcript_file, language, whisper_model, out_path, dataset_name, diarize_speakers,
+    expected_speakers=0, diarize_threshold=0.3,
+    generate_synthetic=False, synthetic_audio_file=None, synthetic_vtt_file=None,
+    auto_split_sentences=True,
+    progress=gr.Progress()
+):
     try:
         tracker = PreprocessProgressTracker(progress)
+        
+        if generate_synthetic:
+            if not synthetic_audio_file:
+                raise ValueError("Synthetic data import active, but no synthesized audiobook file was uploaded.")
+            if not synthetic_vtt_file:
+                raise ValueError("Synthetic data import active, but no matching .vtt file was uploaded.")
+            
+            resolved_audio = _path_value(synthetic_audio_file)
+            resolved_vtt = _path_value(synthetic_vtt_file)
+            
+            audio_files = [resolved_audio]
+            audio_dir = None
+            transcript_file = resolved_vtt
+            diarize_speakers = False
+
         result = prepare_dataset(
             output_root=out_path,
             audio_files=audio_files,
@@ -331,6 +357,7 @@ def preprocess_dataset(audio_files, audio_dir, transcript_file, language, whispe
             diarize_speakers=diarize_speakers,
             expected_speakers=int(expected_speakers or 0),
             diarize_threshold=float(diarize_threshold or 0.3),
+            auto_split_sentences=auto_split_sentences,
             progress=tracker,
         )
         
@@ -360,7 +387,6 @@ def preprocess_dataset(audio_files, audio_dir, transcript_file, language, whispe
 
         show_speakers = gr.update(visible=bool(speakers_list), choices=speaker_choices, value=default_speaker_dir if speakers_list else None)
         show_container = gr.update(visible=bool(speakers_list))
-        
         return (
             message,
             default_speaker_dir,
@@ -368,7 +394,7 @@ def preprocess_dataset(audio_files, audio_dir, transcript_file, language, whispe
             result["metadata_val"],
             default_ref,
             gr.update(choices=choices, value=default_speaker_dir),
-            default_ref,
+            _clean_audio_path(default_ref),
             show_speakers,
             show_container,
             _clean_audio_path(default_ref),
@@ -378,7 +404,7 @@ def preprocess_dataset(audio_files, audio_dir, transcript_file, language, whispe
     except Exception as exc:
         return (
             format_exception(exc), "", "", "", "",
-            gr.update(choices=list_datasets(out_path), value=""), "",
+            gr.update(choices=list_datasets(out_path), value=None), None,
             gr.update(visible=False, choices=[]), gr.update(visible=False),
             None, "", []
         )
@@ -423,7 +449,6 @@ def preprocess_re_diarize(dataset_dir, expected_speakers, diarize_threshold, out
 
         show_speakers = gr.update(visible=bool(speakers_list), choices=speaker_choices, value=default_speaker_dir if speakers_list else None)
         show_container = gr.update(visible=bool(speakers_list))
-        
         return (
             message,
             default_speaker_dir,
@@ -431,7 +456,7 @@ def preprocess_re_diarize(dataset_dir, expected_speakers, diarize_threshold, out
             result["metadata_val"],
             default_ref,
             gr.update(choices=choices, value=default_speaker_dir),
-            default_ref,
+            _clean_audio_path(default_ref),
             show_speakers,
             show_container,
             _clean_audio_path(default_ref),
@@ -441,13 +466,13 @@ def preprocess_re_diarize(dataset_dir, expected_speakers, diarize_threshold, out
     except Exception as exc:
         return (
             format_exception(exc), "", "", "", "",
-            gr.update(choices=list_datasets(out_path), value=""), "",
+            gr.update(choices=list_datasets(out_path), value=None), None,
             gr.update(visible=False, choices=[]), gr.update(visible=False),
             None, "", []
         )
 
 
-def run_training(model_key, dataset_dir, language, num_epochs, batch_size, grad_accum, out_path, max_audio_length, restore_path, use_pretrained, extra_overrides_json, sample_epoch_interval=0, sample_text="", progress=gr.Progress()):
+def run_training(model_key, dataset_dir, language, num_epochs, batch_size, grad_accum, out_path, max_audio_length, restore_path, use_pretrained, pretrained_model_id, extra_overrides_json, sample_epoch_interval=0, sample_text="", progress=gr.Progress()):
     try:
         tracker = TrainingProgressTracker(progress, int(num_epochs))
         result = train_model(
@@ -461,6 +486,7 @@ def run_training(model_key, dataset_dir, language, num_epochs, batch_size, grad_
             max_audio_seconds=int(max_audio_length),
             restore_path=restore_path or None,
             use_pretrained=use_pretrained,
+            pretrained_model_id=pretrained_model_id if use_pretrained and not restore_path else None,
             extra_overrides_json=extra_overrides_json or None,
             progress=tracker,
             sample_epoch_interval=int(sample_epoch_interval),
@@ -469,7 +495,7 @@ def run_training(model_key, dataset_dir, language, num_epochs, batch_size, grad_
         message = f"Training finished. Ready artifacts saved in {Path(result['training_root']) / 'ready'}"
         
         updated_models = list_trained_models(out_path, model_key)
-        new_val = updated_models[0][1] if updated_models else ""
+        new_val = updated_models[0][1] if updated_models else None
         
         return (
             message,
@@ -477,15 +503,15 @@ def run_training(model_key, dataset_dir, language, num_epochs, batch_size, grad_
             result["artifacts_file"],
             result["checkpoint"],
             result["config"],
-            result.get("reference_wav", ""),
+            result.get("reference_wav") or None,
             result["artifacts_file"],
-            result.get("reference_wav", ""),
+            _clean_audio_path(result.get("reference_wav")),
             model_key,
             gr.update(choices=updated_models, value=new_val),
             gr.update(choices=[("None", "")] + updated_models, value=""),
         )
     except Exception as exc:
-        return format_exception(exc), "", "", "", "", "", "", "", model_key, gr.update(), gr.update()
+        return format_exception(exc), "", "", "", "", None, "", None, model_key, gr.update(), gr.update()
 
 
 def locate_artifacts(out_path, model_key):
@@ -499,14 +525,14 @@ def locate_artifacts(out_path, model_key):
             artifacts["artifacts_file"],
             artifacts["checkpoint"],
             artifacts["config"],
-            artifacts.get("reference_wav", ""),
+            artifacts.get("reference_wav") or None,
             artifacts["artifacts_file"],
-            artifacts.get("reference_wav", ""),
+            _clean_audio_path(artifacts.get("reference_wav")),
             artifacts["model_key"],
             gr.update(choices=updated_models, value=new_val),
         )
     except Exception as exc:
-        return format_exception(exc), "", "", "", "", "", "", "", model_key, gr.update()
+        return format_exception(exc), "", "", "", "", "", "", None, model_key, gr.update()
 
 
 def inspect_artifacts(artifacts_path, model_key):
@@ -518,11 +544,11 @@ def inspect_artifacts(artifacts_path, model_key):
             artifacts["artifacts_file"],
             artifacts["checkpoint"],
             artifacts["config"],
-            artifacts.get("reference_wav", ""),
-            artifacts.get("reference_wav", ""),
+            artifacts.get("reference_wav") or None,
+            _clean_audio_path(artifacts.get("reference_wav")),
         )
     except Exception as exc:
-        return format_exception(exc), "", "", "", "", "", ""
+        return format_exception(exc), "", "", "", "", None, None
 
 
 def run_inference(artifacts_path, model_key, language, tts_text, speaker_audio_file, out_path, progress=gr.Progress()):
@@ -537,6 +563,9 @@ def run_inference(artifacts_path, model_key, language, tts_text, speaker_audio_f
             progress=_gradio_progress(progress),
         )
         return "Speech generated.", _clean_audio_path(result["output_file"]), _clean_audio_path(result.get("speaker_wav"))
+    except ValueError as exc:
+        # Display validation/user errors cleanly in the GUI status
+        return f"Error: {exc}", None, None
     except Exception as exc:
         return format_exception(exc), None, None
 
@@ -553,11 +582,11 @@ def on_model_change(selected_model):
 
 def on_select_speaker(selected_dir, speakers_state):
     if not selected_dir or not speakers_state:
-        return gr.update(), "", "", "", gr.update()
+        return gr.update(), "", None, "", gr.update()
     
     speaker_info = next((s for s in speakers_state if s["dataset_dir"] == selected_dir), None)
     if not speaker_info:
-        return gr.update(), "", "", "", gr.update()
+        return gr.update(), "", None, "", gr.update()
         
     info_md = f"**Dataset path**: `{selected_dir}`\n**Duration**: {speaker_info['total_audio_seconds']} seconds\n**Total clips**: {speaker_info['created_sample_count']}"
     ref_wav = speaker_info["reference_wav"]
@@ -574,19 +603,38 @@ def on_training_params_change(model_key, dataset_dir):
     return epochs, batch_size
 
 
-def update_training_options(model_key, language, use_pretrained):
+def update_checkpoint_choices(model_key, language):
+    if model_key == "piper":
+        from utils.piper_utils import list_piper_checkpoint_choices, resolve_piper_checkpoint
+        checkpoints = list(list_piper_checkpoint_choices(language))
+        if checkpoints:
+            preferred = resolve_piper_checkpoint(language)["id"]
+            checkpoints.sort(key=lambda item: (item["id"] != preferred, item["id"]))
+        choices = [
+            (f"{item['locale']} · {item['voice'].replace('_', ' ').title()} · {item['quality']}", item["id"])
+            for item in checkpoints
+        ]
+    else:
+        choices = [(model_id.split("/")[2].replace("_", " ").title(), model_id) for model_id in pretrained_model_choices(model_key, language)]
+    return gr.update(choices=choices, value=choices[0][1] if choices else None, interactive=bool(choices))
+
+
+def update_training_options(model_key, language, use_pretrained, pretrained_model_id=None):
     try:
         from utils.model_registry import get_model_spec
         spec = get_model_spec(model_key)
         model_label = spec.label
-        official_model_id = spec.official_model_id
+        choices = pretrained_model_choices(model_key, language)
+        official_model_id = pretrained_model_id if pretrained_model_id in choices else (choices[0] if choices else None)
         family = spec.family
     except Exception as exc:
         return f"Error loading model spec: {exc}", gr.update()
 
     # 1. XTTS family
     if family == "xtts":
-        msg = f"🟢 **{model_label}** is a multilingual model supporting all listed languages.\n\n"
+        if not choices:
+            return f"❌ **{model_label}** does not support `{language}`. Choose another language or model.", gr.update(value=False, interactive=False)
+        msg = f"🟢 **{model_label}** supports `{language}` using a multilingual checkpoint.\n\n"
         if use_pretrained:
             msg += f"Fine-tuning will start from the official pre-trained multilingual checkpoint: `{official_model_id}`."
         else:
@@ -597,74 +645,67 @@ def update_training_options(model_key, language, use_pretrained):
     elif family == "piper":
         from utils.piper_utils import resolve_piper_checkpoint
         try:
-            checkpoint_info = resolve_piper_checkpoint(language)
-            resolved_lang = checkpoint_info.get("lang")
-            normalized_req_lang = language.split("-")[0].split("_")[0].lower()
-
-            if resolved_lang == normalized_req_lang:
-                msg = f"🟢 **Piper TTS** has a pre-trained checkpoint for `{language}`: `{checkpoint_info['voice']}` ({checkpoint_info['quality']}).\n\n"
-                if use_pretrained:
-                    msg += f"Fine-tuning will download and use the official `{language}` pre-trained checkpoint."
-                else:
-                    msg += "**Training from scratch** (random initialization). *Note: Training from scratch is not recommended unless you have a very large dataset and plan to train for many steps.*"
-                return msg, gr.update(interactive=True)
-            else:
-                msg = f"🟡 **Piper TTS** has no official pre-trained checkpoint mapped for `{language}`.\n\n"
-                if use_pretrained:
-                    msg += f"Fine-tuning will default to using the English base model (`{checkpoint_info['voice']}`) as a starting point (cross-lingual transfer)."
-                else:
-                    msg += "**Training from scratch** (random initialization). *Note: Training from scratch is not recommended unless you have a very large dataset and plan to train for many steps.*"
-                return msg, gr.update(interactive=True)
-        except Exception as e:
-            msg = f"🟡 **Piper TTS** pre-trained checkpoint check failed: {e}. Defaulting to training from scratch or cross-lingual transfer."
-            return msg, gr.update(interactive=True)
+            lang = language.split("-")[0].split("_")[0].lower()
+            selected_id = pretrained_model_id if pretrained_model_id and pretrained_model_id.startswith(f"piper:{lang}/") else None
+            checkpoint_info = resolve_piper_checkpoint(language, checkpoint_id=selected_id)
+        except (LookupError, ValueError) as exc:
+            return (
+                f"🟡 **Piper TTS** has no matching training checkpoint for `{language}`: {exc}. Training from scratch remains available.",
+                gr.update(value=False, interactive=False),
+            )
+        msg = f"🟢 **Piper TTS** has a `{language}` training checkpoint: `{checkpoint_info['id']}`.\n\n"
+        if use_pretrained:
+            msg += "Fine-tuning will download and load this checkpoint."
+        else:
+            msg += "Training will start from scratch."
+        return msg, gr.update(interactive=True)
 
     # 3. Single-language models
     else:
-        if language == "en":
-            if official_model_id:
-                msg = f"🟢 **{model_label}** has a pre-trained English checkpoint mapped: `{official_model_id}`.\n\n"
-                if use_pretrained:
-                    msg += "Fine-tuning will download and use this pre-trained base model."
-                else:
-                    msg += "**Training from scratch** (random initialization). This means the model weights start completely blank."
-                return msg, gr.update(interactive=True)
+        if official_model_id:
+            msg = f"🟢 **{model_label}** has a pre-trained `{language}` checkpoint mapped: `{official_model_id}`.\n\n"
+            if use_pretrained:
+                msg += "Fine-tuning will download and use this pre-trained base model."
             else:
-                msg = f"🟡 **{model_label}** has no official pre-trained checkpoint mapped.\n\n"
-                msg += "**Training from scratch** (random initialization) is required. *Training from scratch means the model starts with random weights and requires a larger dataset (hours of audio) and longer training (e.g. 100k+ steps) to sound intelligible.*"
-                return msg, gr.update(value=False, interactive=False)
+                msg += "**Training from scratch** (random initialization). This means the model weights start completely blank."
+            return msg, gr.update(interactive=True)
         else:
-            msg = f"❌ **{model_label}** is a single-language model designed for English. There is no pre-trained checkpoint mapped for `{language}`.\n\n"
+            msg = f"🟡 **{model_label}** has no pre-trained checkpoint mapped for `{language}`.\n\n"
             msg += "**Training from scratch** (random initialization) is required. *Training from scratch means the model starts with random weights and requires a larger dataset (hours of audio) and longer training (e.g. 100k+ steps) to sound intelligible.*\n\n"
-            msg += f"✨ **Automatic Recipe Optimization**: The backend will dynamically adapt the recipe at runtime to use `\"multilingual_cleaners\"` and the `{language}` phonemizer, ensuring it compiles and trains successfully on your dataset."
+            msg += f"The backend adapts the recipe to the `{language}` phonemizer when available."
             return msg, gr.update(value=False, interactive=False)
 
 
 def preprocess_and_train(
     audio_files, audio_dir, transcript_file, language, whisper_model, out_path, dataset_name, diarize_speakers,
     expected_speakers, diarize_threshold,
-    model_key, train_language, num_epochs, batch_size, grad_accum, max_audio_length, restore_path, use_pretrained, extra_overrides_json,
+    generate_synthetic, synthetic_audio_file, synthetic_vtt_file,
+    model_key, train_language, num_epochs, batch_size, grad_accum, max_audio_length, restore_path, use_pretrained, pretrained_model_id, extra_overrides_json,
     sample_epoch_interval, sample_text,
     tts_text,
+    auto_split_sentences=True,
     progress=gr.Progress()
 ):
     try:
         progress(0, desc="Starting step 1: Preprocessing dataset...")
         preprocess_res = preprocess_dataset(
             audio_files, audio_dir, transcript_file, language, whisper_model, out_path, dataset_name, diarize_speakers,
-            expected_speakers, diarize_threshold, progress
+            expected_speakers, diarize_threshold,
+            generate_synthetic, synthetic_audio_file, synthetic_vtt_file,
+            auto_split_sentences,
+            progress
         )
         status_msg, dataset_dir = preprocess_res[0], preprocess_res[1]
         if not dataset_dir or "failed" in status_msg.lower():
             train_status_msg = f"Training skipped because dataset preparation failed: {status_msg}"
-            empty_train = (train_status_msg, "", "", "", "", "", "", "", model_key, gr.update(), gr.update())
+            empty_train = (train_status_msg, "", "", "", "", "", "", None, model_key, gr.update(), gr.update())
             empty_infer = (f"Inference skipped: Preprocessing failed.", None, None)
             return empty_train + preprocess_res + empty_infer
             
         progress(0.4, desc="Preprocessing complete! Starting step 2: Training model...")
         
         train_res = run_training(
-            model_key, dataset_dir, train_language, num_epochs, batch_size, grad_accum, out_path, max_audio_length, restore_path, use_pretrained, extra_overrides_json,
+            model_key, dataset_dir, train_language, num_epochs, batch_size, grad_accum, out_path, max_audio_length, restore_path, use_pretrained, pretrained_model_id, extra_overrides_json,
             sample_epoch_interval, sample_text,
             progress
         )
@@ -684,8 +725,8 @@ def preprocess_and_train(
         return train_res + preprocess_res + infer_res
     except Exception as exc:
         err = format_exception(exc)
-        empty_train = (f"Pipeline error: {err}", "", "", "", "", "", "", "", model_key, gr.update(), gr.update())
-        empty_prep = (err, "", "", "", "", gr.update(choices=list_datasets(out_path), value=""), "", gr.update(visible=False, choices=[]), gr.update(visible=False), None, "", [])
+        empty_train = (f"Pipeline error: {err}", "", "", "", "", "", "", None, model_key, gr.update(), gr.update())
+        empty_prep = (err, "", "", "", "", gr.update(choices=list_datasets(out_path), value=None), None, gr.update(visible=False, choices=[]), gr.update(visible=False), None, "", [])
         empty_infer = (f"Pipeline error: {err}", None, None)
         return empty_train + empty_prep + empty_infer
 
@@ -693,7 +734,8 @@ def preprocess_and_train(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Universal Coqui TTS fine-tuning web UI")
     parser.add_argument("--share", action="store_true", default=False)
-    parser.add_argument("--port", type=int, default=5003)
+    parser.add_argument("--host", default="127.0.0.1", help="Interface to bind the web UI to")
+    parser.add_argument("--port", type=int, default=7862)
     parser.add_argument("--out_path", type=str, default=str(Path.cwd() / "finetune_models"))
     parser.add_argument("--num_epochs", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=8)
@@ -701,29 +743,31 @@ if __name__ == "__main__":
     parser.add_argument("--max_audio_length", type=int, default=11)
     args = parser.parse_args()
 
-    theme = gr.themes.Soft(
-        primary_hue="violet",
-        secondary_hue="indigo",
-        neutral_hue="slate",
+    theme = gr.themes.Origin(
+        primary_hue="green",
+        secondary_hue="amber",
+        neutral_hue="gray",
+        radius_size="lg",
+        font_mono=["JetBrains Mono", "monospace", "Consolas", "Menlo", "Liberation Mono"],
     )
 
     css_str = """
     .primary-btn {
-        background: linear-gradient(90deg, #8b5cf6 0%, #6366f1 100%) !important;
+        background: linear-gradient(90deg, #22c55e 0%, #eab308 100%) !important;
         color: white !important;
         border: none !important;
         transition: transform 0.15s ease, box-shadow 0.15s ease !important;
     }
     .primary-btn:hover {
         transform: translateY(-1px);
-        box-shadow: 0 4px 12px rgba(139, 92, 246, 0.4) !important;
+        box-shadow: 0 4px 12px rgba(34, 197, 94, 0.4) !important;
     }
     .primary-btn:active {
         transform: translateY(0);
     }
     """
 
-    with gr.Blocks(title="Universal TTS Finetune", theme=theme, css=css_str) as demo:
+    with gr.Blocks(title='Universal TTS Finetune') as demo:
         gr.Markdown(
             "# Universal TTS Finetune\n"
             "Prepare an LJSpeech-style dataset, fine-tune a supported Coqui recipe, and test the trained model."
@@ -737,13 +781,46 @@ if __name__ == "__main__":
                 label="Audio files (wav, mp3, flac, m4a, ogg)",
             )
             audio_dir = gr.Textbox(label="Audio folder path (optional)", value="")
-            transcript_file = gr.File(label="Optional transcript map (csv, tsv, pipe-delimited txt, or json)")
+            transcript_file = gr.File(label="Optional transcript map or alignment file (.vtt, .txt, .csv, .tsv, .json)")
+            auto_split_sentences = gr.Checkbox(label="Auto-split sentences for forced alignment (plain text input)", value=True)
+            gr.Markdown(
+                "💡 **How to provide text/transcripts:**\n"
+                "- **None (Auto-detect / Whisper)**: Leave blank to auto-transcribe. If you point to an **Audio folder path** containing matching `.vtt` or `.txt` files with the exact same base name as your audio files (e.g., `chapter1.mp3` and `chapter1.txt`), the system will automatically match them to slice or run Forced Alignment. Any audio files without matching transcripts will automatically fallback to Whisper.\n"
+                "- **WebVTT (.vtt)**: Upload a WebVTT file along with the full audiobook file (e.g. generated by `ebook2audiobook`) to slice it instantly with 0% transcription errors.\n"
+                "- **Plain Text (.txt) - Forced Alignment**: Upload a plain text book file (e.g. converted from ePUB using Calibre) along with a single full audiobook file to run **Forced Alignment**. If the text contains multiple sentences on a line or is a single paragraph, leave **Auto-split sentences for forced alignment** checked to automatically chunk it into sentences.\n"
+                "- **Transcript Map (.csv, .tsv, .json, or delimited .txt)**: Upload a mapping file of `audio_file|text` matching a folder of pre-split audio files."
+            )
             language = gr.Dropdown(label="Dataset language", choices=LANGUAGE_CHOICES, value="en")
-            whisper_model = gr.Dropdown(label="Whisper model", choices=WHISPER_CHOICES, value="small")
+            whisper_model = gr.Dropdown(label="Whisper model", choices=WHISPER_CHOICES, value="small", allow_custom_value=True)
             diarize_speakers = gr.Checkbox(label="Diarize speakers (split multi-speaker audio)", value=False)
             with gr.Row(visible=False) as diarize_options:
                 expected_speakers = gr.Slider(label="Expected speaker count (0 for auto)", minimum=0, maximum=20, step=1, value=0)
                 diarize_threshold = gr.Slider(label="Diarization threshold (distance, only if auto)", minimum=0.05, maximum=1.0, step=0.05, value=0.35)
+
+            # Synthetic Data Generation Option
+            generate_synthetic = gr.Checkbox(
+                label="Don't have enough training data? Import synthetic data from ebook2audiobook",
+                value=False
+            )
+            with gr.Group(visible=False) as synthetic_options:
+                gr.Markdown("### Import Synthetic Data")
+                synthetic_audio_file = gr.File(
+                    label="Upload synthesized audiobook (mp3, wav, flac, etc.)",
+                    file_count="single"
+                )
+                synthetic_vtt_file = gr.File(
+                    label="Upload matching .vtt file",
+                    file_count="single"
+                )
+
+            def _toggle_synthetic_group(enabled):
+                return gr.update(visible=enabled)
+
+            generate_synthetic.change(
+                fn=_toggle_synthetic_group,
+                inputs=[generate_synthetic],
+                outputs=[synthetic_options]
+            )
             
             # Speaker preview group (initially hidden)
             speakers_state = gr.State([])
@@ -767,7 +844,7 @@ if __name__ == "__main__":
                 re_diarize_source = gr.Dropdown(
                     label="Select dataset to re-diarize",
                     choices=list_datasets(args.out_path),
-                    value="",
+                    value=None,
                     allow_custom_value=True,
                     interactive=True,
                 )
@@ -779,25 +856,32 @@ if __name__ == "__main__":
         with gr.Tab("2 - Train model"):
             model_key = gr.Dropdown(label="Model", choices=MODEL_CHOICES, value="xtts_v2")
             model_checkpoint_warning = gr.Markdown(
-                value="🟢 **XTTS v2** is a multilingual model supporting all listed languages.\n\nFine-tuning will start from the official pre-trained multilingual checkpoint: `tts_models/multilingual/multi-dataset/xtts_v2`."
+                value="🟢 **XTTS v2** supports English.\n\nFine-tuning will start from the official multilingual checkpoint: `tts_models/multilingual/multi-dataset/xtts_v2`."
             )
             train_dataset_dir = gr.Dropdown(
                 label="Dataset directory",
                 choices=list_datasets(args.out_path),
-                value="",
+                value=None,
                 allow_custom_value=True,
                 interactive=True,
             )
-            train_language = gr.Dropdown(label="Model language (XTTS/Piper support multilingual)", choices=LANGUAGE_CHOICES, value="en")
+            train_language = gr.Dropdown(label="Fine-tuning language", choices=LANGUAGE_CHOICES, value="en", info="Choose your dataset language; available base checkpoints update automatically.")
             with gr.Row():
                 restore_model_dropdown = gr.Dropdown(
                     label="Resume from previous training run",
                     choices=[("None", "")] + list_trained_models(args.out_path, "xtts_v2"),
-                    value="",
+                    value=None,
                     interactive=True,
                 )
                 restore_path = gr.Textbox(label="Optional checkpoint to continue from", value="")
-            use_pretrained = gr.Checkbox(label="Auto-download matching pretrained model when available", value=True)
+            use_pretrained = gr.Checkbox(label="Start from a pretrained checkpoint", value=True)
+            pretrained_model_id = gr.Dropdown(
+                label="Starting checkpoint",
+                choices=list(pretrained_model_choices("xtts_v2", "en")),
+                value=pretrained_model_choices("xtts_v2", "en")[0],
+                interactive=True,
+                info="Choose a published voice or model for this language. Your local restore path takes precedence.",
+            )
             num_epochs = gr.Slider(label="Epochs", minimum=1, maximum=1000, step=1, value=args.num_epochs)
             batch_size = gr.Slider(label="Batch size", minimum=1, maximum=128, step=1, value=args.batch_size)
             grad_accum = gr.Slider(label="Grad accumulation", minimum=1, maximum=128, step=1, value=args.grad_acumm)
@@ -838,11 +922,15 @@ if __name__ == "__main__":
             infer_trained_model = gr.Dropdown(
                 label="Select previously fine-tuned model",
                 choices=list_trained_models(args.out_path, "xtts_v2"),
-                value="",
+                value=None,
                 interactive=True,
             )
             infer_artifacts = gr.Textbox(label="Artifacts file or ready/training folder", value="")
-            speaker_reference_audio = gr.Textbox(label="Optional speaker reference WAV (XTTS)", value="")
+            speaker_reference_audio = gr.Audio(
+                label="Speaker reference audio – drag & drop or click to upload (Required for XTTS)",
+                type="filepath",
+                sources=["upload"],
+            )
             infer_language = gr.Dropdown(label="Inference language", choices=LANGUAGE_CHOICES, value="en")
             tts_text = gr.Textbox(label="Input text", value="This fine-tuned model is ready to test.")
             infer_status = gr.Textbox(label="Status", interactive=False)
@@ -864,6 +952,10 @@ if __name__ == "__main__":
                 diarize_speakers,
                 expected_speakers,
                 diarize_threshold,
+                generate_synthetic,
+                synthetic_audio_file,
+                synthetic_vtt_file,
+                auto_split_sentences,
             ],
             outputs=[
                 dataset_status,
@@ -925,6 +1017,9 @@ if __name__ == "__main__":
                 diarize_speakers,
                 expected_speakers,
                 diarize_threshold,
+                generate_synthetic,
+                synthetic_audio_file,
+                synthetic_vtt_file,
                 # Training inputs
                 model_key,
                 train_language,
@@ -934,11 +1029,13 @@ if __name__ == "__main__":
                 max_audio_length,
                 restore_path,
                 use_pretrained,
+                pretrained_model_id,
                 extra_overrides_json,
                 sample_epoch_interval,
                 sample_text,
                 # Inference input
                 tts_text,
+                auto_split_sentences,
             ],
             outputs=[
                 # Training outputs (11 items)
@@ -998,6 +1095,7 @@ if __name__ == "__main__":
                 max_audio_length,
                 restore_path,
                 use_pretrained,
+                pretrained_model_id,
                 extra_overrides_json,
                 sample_epoch_interval,
                 sample_text,
@@ -1082,17 +1180,24 @@ if __name__ == "__main__":
         )
         model_key.change(
             fn=update_training_options,
-            inputs=[model_key, train_language, use_pretrained],
+            inputs=[model_key, train_language, use_pretrained, pretrained_model_id],
             outputs=[model_checkpoint_warning, use_pretrained],
         )
+        model_key.change(fn=update_checkpoint_choices, inputs=[model_key, train_language], outputs=[pretrained_model_id])
         train_language.change(
             fn=update_training_options,
-            inputs=[model_key, train_language, use_pretrained],
+            inputs=[model_key, train_language, use_pretrained, pretrained_model_id],
             outputs=[model_checkpoint_warning, use_pretrained],
         )
+        train_language.change(fn=update_checkpoint_choices, inputs=[model_key, train_language], outputs=[pretrained_model_id])
         use_pretrained.change(
-            fn=lambda m, l, u: update_training_options(m, l, u)[0],
-            inputs=[model_key, train_language, use_pretrained],
+            fn=lambda m, l, u, p: update_training_options(m, l, u, p)[0],
+            inputs=[model_key, train_language, use_pretrained, pretrained_model_id],
+            outputs=[model_checkpoint_warning],
+        )
+        pretrained_model_id.change(
+            fn=lambda m, l, u, p: update_training_options(m, l, u, p)[0],
+            inputs=[model_key, train_language, use_pretrained, pretrained_model_id],
             outputs=[model_checkpoint_warning],
         )
 
@@ -1167,8 +1272,14 @@ if __name__ == "__main__":
 
         demo.load(
             fn=update_training_options,
-            inputs=[model_key, train_language, use_pretrained],
+            inputs=[model_key, train_language, use_pretrained, pretrained_model_id],
             outputs=[model_checkpoint_warning, use_pretrained],
         )
 
-    demo.launch(share=args.share, debug=False, server_port=args.port)
+    allowed = [
+        str(Path(args.out_path).resolve()),
+        str(Path.home()),
+        str(Path.cwd().resolve()),
+        str(Path.cwd().parent.parent.resolve())
+    ]
+    demo.launch(share=args.share, debug=False, server_name=args.host, server_port=args.port, allowed_paths=allowed, theme=theme, css=css_str)

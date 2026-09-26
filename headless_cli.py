@@ -42,6 +42,7 @@ from utils.pipeline import (
     train_model,
     _json_ready,
 )
+from utils.model_registry import pretrained_model_choices
 
 
 def _print_json(payload: dict) -> None:
@@ -67,6 +68,9 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("list-models", help="List supported training recipes.")
+    checkpoints = subparsers.add_parser("list-checkpoints", help="List pretrained checkpoints for an engine and language.")
+    checkpoints.add_argument("--model", required=True, choices=[key for key, _ in dropdown_choices()])
+    checkpoints.add_argument("--language", required=True)
 
     prepare = subparsers.add_parser("prepare-dataset", help="Build an LJSpeech-style dataset from audio files.")
     prepare.add_argument("--output-root", required=True)
@@ -82,6 +86,8 @@ def _build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--diarize-speakers", action="store_true", help="Automatically cluster audio into separate speaker datasets")
     prepare.add_argument("--expected-speakers", type=int, default=0, help="Expected number of speaker clusters (0 to auto-detect based on threshold)")
     prepare.add_argument("--diarize-threshold", type=float, default=0.3, help="Distance threshold for speaker clustering auto-detection (used if expected-speakers is 0)")
+    prepare.add_argument("--no-auto-split-sentences", dest="auto_split_sentences", action="store_false", help="Disable automatic sentence splitting for forced alignment")
+    prepare.set_defaults(auto_split_sentences=True)
 
     train = subparsers.add_parser("train", help="Train or fine-tune a selected Coqui recipe.")
     train.add_argument("--model", required=True, choices=[key for key, _ in dropdown_choices()])
@@ -93,6 +99,7 @@ def _build_parser() -> argparse.ArgumentParser:
     train.add_argument("--grad-accum", type=int, default=1)
     train.add_argument("--max-audio-seconds", type=int, default=11)
     train.add_argument("--restore-path")
+    train.add_argument("--pretrained-model-id", help="Exact mapped pretrained checkpoint to fine-tune; omit for the default matching the language")
     train.add_argument("--extra-overrides-json")
     train.add_argument("--no-pretrained", action="store_true")
     train.add_argument("--dry-run", action="store_true")
@@ -121,6 +128,7 @@ def _build_parser() -> argparse.ArgumentParser:
     workflow.add_argument("--grad-accum", type=int, default=1)
     workflow.add_argument("--max-audio-seconds", type=int, default=11)
     workflow.add_argument("--restore-path")
+    workflow.add_argument("--pretrained-model-id", help="Exact mapped pretrained checkpoint to fine-tune")
     workflow.add_argument("--extra-overrides-json")
     workflow.add_argument("--no-pretrained", action="store_true")
     workflow.add_argument("--test-text")
@@ -132,6 +140,8 @@ def _build_parser() -> argparse.ArgumentParser:
     workflow.add_argument("--diarize-threshold", type=float, default=0.3, help="Distance threshold for speaker clustering auto-detection (used if expected-speakers is 0)")
     workflow.add_argument("--sample-epoch-interval", type=int, default=0, help="Generate and save an audio sample every N epochs. Set to 0 to disable.")
     workflow.add_argument("--sample-text", default="", help="Text sentence to synthesize at each interval.")
+    workflow.add_argument("--no-auto-split-sentences", dest="auto_split_sentences", action="store_false", help="Disable automatic sentence splitting for forced alignment")
+    workflow.set_defaults(auto_split_sentences=True)
 
     batch_test = subparsers.add_parser("batch-test", help="Test all supported models sequentially on the same dataset.")
     batch_test.add_argument("--output-root", required=True)
@@ -152,6 +162,8 @@ def _build_parser() -> argparse.ArgumentParser:
     batch_test.add_argument("--diarize-threshold", type=float, default=0.3, help="Distance threshold for speaker clustering auto-detection (used if expected-speakers is 0)")
     batch_test.add_argument("--no-stream-logs", action="store_true", help="Disable streaming of training logs to the console")
     batch_test.add_argument("--extra-overrides-json")
+    batch_test.add_argument("--no-auto-split-sentences", dest="auto_split_sentences", action="store_false", help="Disable automatic sentence splitting for forced alignment")
+    batch_test.set_defaults(auto_split_sentences=True)
 
     latest = subparsers.add_parser("latest-artifacts", help="Resolve the newest trained model artifacts.")
     latest.add_argument("--output-root", required=True)
@@ -165,6 +177,15 @@ def main() -> None:
 
     if args.command == "list-models":
         _print_json({"models": list_supported_models()})
+        return
+
+    if args.command == "list-checkpoints":
+        if args.model == "piper":
+            from utils.piper_utils import list_piper_checkpoint_choices
+            choices = [item["id"] for item in list_piper_checkpoint_choices(args.language)]
+        else:
+            choices = list(pretrained_model_choices(args.model, args.language))
+        _print_json({"model": args.model, "language": args.language, "checkpoints": choices})
         return
 
     if args.command == "prepare-dataset":
@@ -182,6 +203,7 @@ def main() -> None:
             diarize_speakers=args.diarize_speakers,
             expected_speakers=args.expected_speakers,
             diarize_threshold=args.diarize_threshold,
+            auto_split_sentences=args.auto_split_sentences,
         )
         _print_json(result)
         return
@@ -198,6 +220,7 @@ def main() -> None:
             max_audio_seconds=args.max_audio_seconds,
             restore_path=args.restore_path,
             use_pretrained=not args.no_pretrained,
+            pretrained_model_id=args.pretrained_model_id,
             extra_overrides_json=args.extra_overrides_json,
             dry_run=args.dry_run,
             stream_logs=not args.no_stream_logs,
@@ -232,6 +255,7 @@ def main() -> None:
             diarize_speakers=args.diarize_speakers,
             expected_speakers=args.expected_speakers,
             diarize_threshold=args.diarize_threshold,
+            auto_split_sentences=args.auto_split_sentences,
         )
         training = train_model(
             model_key=args.model,
@@ -244,6 +268,7 @@ def main() -> None:
             max_audio_seconds=args.max_audio_seconds,
             restore_path=args.restore_path,
             use_pretrained=not args.no_pretrained,
+            pretrained_model_id=args.pretrained_model_id,
             extra_overrides_json=args.extra_overrides_json,
             stream_logs=not args.no_stream_logs,
             sample_epoch_interval=args.sample_epoch_interval,
@@ -273,6 +298,7 @@ def main() -> None:
             diarize_speakers=args.diarize_speakers,
             expected_speakers=args.expected_speakers,
             diarize_threshold=args.diarize_threshold,
+            auto_split_sentences=args.auto_split_sentences,
         )
         
         import shutil
