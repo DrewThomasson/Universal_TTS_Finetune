@@ -270,6 +270,11 @@ def run_omnivoice_finetune(
         "transformers", "torch", "torchaudio", "webdataset",
     ):
         _require_module(module, "install OmniVoice, Accelerate, and PEFT in the configured OmniVoice environment", python)
+    _require_module(
+        "omnivoice.utils.lora",
+        "the documented official OmniVoice source revision; its PyPI 0.2.1 wheel lacks LoRA support",
+        python,
+    )
     _cuda_preflight(min_free_vram_gib, min_total_vram_gib, python)
 
     # Force local-only resolution before any work directory or subprocess is created.
