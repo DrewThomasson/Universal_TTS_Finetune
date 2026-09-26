@@ -43,6 +43,7 @@ from dataclasses import asdict
 import os
 from pathlib import Path
 from utils.model_paths import get_models_dir
+from utils.language_support import coqui_dataset_extra_symbols, coqui_phoneme_language
 
 _PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 _MODELS_DIR = get_models_dir()
@@ -1289,6 +1290,7 @@ def _patch_recipe_script(
     trusted_pretrained_restore: bool,
     extra_overrides: dict[str, Any],
     reference_wav: str,
+    extra_phonemes: str,
 ) -> list[str]:
     source = script_path.read_text(encoding="utf-8")
     if trusted_pretrained_restore:
@@ -1355,7 +1357,25 @@ def _patch_recipe_script(
         for q in ['"', "'"]:
             source = source.replace(f'text_cleaner={q}english_cleaners{q}', f'text_cleaner={q}multilingual_cleaners{q}')
             source = source.replace(f'text_cleaner={q}phoneme_cleaners{q}', f'text_cleaner={q}multilingual_cleaners{q}')
-            source = source.replace(f'phoneme_language={q}en-us{q}', f'phoneme_language={q}{language}{q}')
+            source = source.replace(
+                f'phoneme_language={q}en-us{q}',
+                f'phoneme_language={q}{coqui_phoneme_language(language)}{q}',
+            )
+
+    if extra_phonemes:
+        tokenizer_call = re.search(
+            r"(?m)^tokenizer, config = TTSTokenizer\.init_from_config\((\w+)\)", source
+        )
+        if not tokenizer_call:
+            raise ValueError(f"Could not expand the {spec_key} recipe's phoneme vocabulary.")
+        config_name = tokenizer_call.group(1)
+        expansion = (
+            "from TTS.tts.utils.text.characters import IPAPhonemes as _UftIPAPhonemes\n"
+            f"{config_name}.characters = _UftIPAPhonemes("
+            f"characters=_UftIPAPhonemes().characters + {extra_phonemes!r}"
+            ").to_config()\n"
+        )
+        source = source[:tokenizer_call.start()] + expansion + source[tokenizer_call.start():]
 
     if spec_key.startswith("xtts_"):
         # With START_WITH_EVAL=True the Trainer skips training in its first
@@ -1685,8 +1705,26 @@ def train_model(
     language = language.lower() if model_key == "mms_vits" else normalize_language(language)
     if spec.family == "xtts" and not pretrained_model_choices(model_key, language):
         raise ValueError(f"{spec.label} does not support language {language}.")
+    if model_key == "align_tts" and language != "en":
+        raise ValueError("Align TTS currently uses an English-only character vocabulary.")
+    if spec.family == "tts" and model_key != "align_tts":
+        coqui_phoneme_language(language)
     dataset_root = _normalize_dataset_dir(dataset_dir, output_root)
     dataset_info = load_dataset_info(str(dataset_root))
+    extra_phonemes = ""
+    if spec.family == "tts" and model_key != "align_tts":
+        recipe_source = spec.train_script_path.read_text(encoding="utf-8")
+        cleaner_match = re.search(r"text_cleaner=[\"'](\w+)[\"']", recipe_source)
+        if not cleaner_match:
+            raise ValueError(f"Could not identify the {model_key} recipe's text cleaner.")
+        cleaner_name = "multilingual_cleaners" if language != "en" else cleaner_match.group(1)
+        extra_phonemes = coqui_dataset_extra_symbols(dataset_root, language, cleaner_name)
+        if extra_phonemes and (restore_path or (use_pretrained and pretrained_model_choices(model_key, language))):
+            raise ValueError(
+                f"The {model_key} recipe would discard phoneme symbols {extra_phonemes!r} for '{language}'. "
+                "Its mapped or restored checkpoint cannot expand its vocabulary. "
+                "Turn off pretrained loading to train from scratch with these symbols."
+            )
     output_root_path = _resolve_user_path(output_root, expect_directory=True)
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     training_root = output_root_path / "training_runs" / model_key / timestamp
@@ -1697,6 +1735,7 @@ def train_model(
             raise ValueError("Select either a local Piper restore path or a pretrained checkpoint, and enable pretrained loading.")
         from utils.piper_utils import (
             ensure_monotonic_align_compiled,
+            normalize_espeak_language,
             resolve_piper_checkpoint,
             download_piper_checkpoint,
             preprocess_piper_dataset,
@@ -1742,9 +1781,11 @@ def train_model(
                 ckpt_config = json.load(f)
             sample_rate = ckpt_config.get("audio", {}).get("sample_rate", 22050)
             quality = checkpoint_info.get("quality", "medium")
-            espeak_language = checkpoint_info["locale"].lower().replace("_", "-")
+            espeak_language = ckpt_config.get("espeak", {}).get("voice") or checkpoint_info["locale"].lower().replace("_", "-")
         else:
             _notify(progress, f"Training Piper model from scratch for language: {language}...")
+
+        espeak_language = normalize_espeak_language(espeak_language)
 
         preprocessed_dir = training_root / "preprocessed"
         if not config_path:
@@ -1856,6 +1897,7 @@ def train_model(
         trusted_pretrained_restore=bool(use_pretrained and not restore_path and computed_restore_path),
         extra_overrides=extra_overrides,
         reference_wav=str(reference_wav) if reference_wav else "",
+        extra_phonemes=extra_phonemes,
     )
 
     matching_models = pretrained_model_choices(model_key, language)

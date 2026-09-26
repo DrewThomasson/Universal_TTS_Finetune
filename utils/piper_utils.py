@@ -187,39 +187,32 @@ def download_piper_checkpoint(checkpoint_info: dict[str, str], progress_callback
     return ckpt_path, config_path
 
 def normalize_espeak_language(language_code: str) -> str:
-    """Verifies and normalizes the language code for piper_phonemize.
-    If the language code raises an error when phonemizing, it falls back to the base language code (e.g. en-gb -> en).
-    """
+    """Use a Piper eSpeak voice for this language, never another language."""
     try:
         import piper_phonemize
-        # Try phonemizing a dummy word to see if voice sets up successfully
-        piper_phonemize.phonemize_espeak("test", language_code)
-        return language_code
-    except Exception as e:
-        print(f"eSpeak voice setup failed for '{language_code}': {e}")
-        # Try finding a base language code
-        if "-" in language_code:
-            base_code = language_code.split("-")[0]
-            try:
-                import piper_phonemize
-                piper_phonemize.phonemize_espeak("test", base_code)
-                print(f"Fell back to base voice: '{base_code}'")
-                return base_code
-            except Exception as e_base:
-                print(f"eSpeak voice setup also failed for base voice '{base_code}': {e_base}")
-        elif "_" in language_code:
-            base_code = language_code.split("_")[0]
-            try:
-                import piper_phonemize
-                piper_phonemize.phonemize_espeak("test", base_code)
-                print(f"Fell back to base voice: '{base_code}'")
-                return base_code
-            except Exception as e_base:
-                print(f"eSpeak voice setup also failed for base voice '{base_code}': {e_base}")
+    except ImportError as exc:
+        raise ValueError("Piper phonemizer dependency is unavailable.") from exc
 
-        # If base fails, or there is no delimiter, we can fall back to 'en'
-        print("Falling back to default 'en' voice.")
-        return "en"
+    requested = language_code.lower().replace("_", "-")
+    base = requested.split("-", 1)[0]
+    # Norwegian and Mandarin use different eSpeak codes from Piper's locale names.
+    aliases = {"no": "nb", "zh": "cmn"}
+    candidates = dict.fromkeys((requested, base, aliases.get(base)))
+    last_error = None
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            piper_phonemize.phonemize_espeak("test", candidate)
+            if candidate != requested:
+                print(f"Using Piper eSpeak voice '{candidate}' for '{language_code}'.")
+            return candidate
+        except Exception as exc:
+            last_error = exc
+    raise ValueError(
+        f"Piper cannot phonemize language '{language_code}'. "
+        "Choose a supported Piper language or install its eSpeak voice."
+    ) from last_error
 
 def preprocess_piper_dataset(dataset_dir: Path, output_dir: Path, language_code: str, sample_rate: int):
     """Executes piper_train.preprocess as a python subprocess to prepare the LJSpeech dataset."""

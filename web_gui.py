@@ -51,6 +51,7 @@ from utils.pipeline import (
 from utils.model_registry import MMS_LANGUAGES, XTTS_LANGUAGES, pretrained_model_choices
 from utils.asr import MMS_ASR_LANGUAGES
 from utils.e2a_export import export_e2a_zip
+from utils.language_support import coqui_phoneme_language
 
 LANGUAGE_CHOICES = [
     "en",
@@ -93,6 +94,17 @@ DATASET_LANGUAGE_CHOICES = LANGUAGE_CHOICES + [
 ]
 
 
+def _phonemizer_language_choices(choices):
+    supported = []
+    for language in choices:
+        try:
+            coqui_phoneme_language(language)
+            supported.append(language)
+        except ValueError:
+            pass
+    return supported
+
+
 def update_finetune_language_choices(model_key):
     if model_key in XTTS_LANGUAGE_CHOICES:
         return gr.update(choices=XTTS_LANGUAGE_CHOICES[model_key], value="en")
@@ -101,8 +113,12 @@ def update_finetune_language_choices(model_key):
     if model_key == "piper":
         return gr.update(choices=PIPER_LANGUAGE_CHOICES, value="en")
     if model_key == "vits_tts":
-        return gr.update(choices=VITS_LANGUAGE_CHOICES, value="en")
-    return gr.update(choices=LANGUAGE_CHOICES, value="en")
+        choices = _phonemizer_language_choices(VITS_LANGUAGE_CHOICES)
+    elif model_key == "align_tts":
+        choices = ["en"]
+    else:
+        choices = _phonemizer_language_choices(LANGUAGE_CHOICES)
+    return gr.update(choices=choices, value="en" if "en" in choices else (choices[0] if choices else None))
 
 
 class PreprocessProgressTracker:
@@ -674,6 +690,14 @@ def update_training_options(model_key, language, use_pretrained, pretrained_mode
     except Exception as exc:
         return f"Error loading model spec: {exc}", gr.update()
 
+    if family == "tts" and model_key != "align_tts":
+        try:
+            coqui_phoneme_language(language)
+        except ValueError as exc:
+            return f"❌ **{model_label}** cannot train `{language}`: {exc}", gr.update(value=False, interactive=False)
+    if model_key == "align_tts" and language != "en":
+        return "❌ Align TTS currently uses an English-only character vocabulary. Choose `en`.", gr.update(value=False, interactive=False)
+
     # 1. XTTS family
     if family == "xtts":
         if not choices:
@@ -687,18 +711,28 @@ def update_training_options(model_key, language, use_pretrained, pretrained_mode
 
     # 2. Piper family
     elif family == "piper":
-        from utils.piper_utils import resolve_piper_checkpoint
+        from utils.piper_utils import normalize_espeak_language, resolve_piper_checkpoint
         try:
             lang = language.split("-")[0].split("_")[0].lower()
             selected_id = pretrained_model_id if pretrained_model_id and pretrained_model_id.startswith(f"piper:{lang}/") else None
             checkpoint_info = resolve_piper_checkpoint(language, checkpoint_id=selected_id)
         except (LookupError, ValueError) as exc:
+            checkpoint_info = None
+            checkpoint_error = exc
+        voice_language = checkpoint_info["locale"].lower().replace("_", "-") if checkpoint_info else language
+        try:
+            phoneme_language = normalize_espeak_language(voice_language)
+        except ValueError as exc:
+            return f"❌ **Piper TTS** cannot train `{language}`: {exc}", gr.update(value=False, interactive=False)
+        if checkpoint_info is None:
             return (
-                f"🟡 **Piper TTS** has no matching training checkpoint for `{language}`: {exc}. "
+                f"🟡 **Piper TTS** has no matching training checkpoint for `{language}`: {checkpoint_error}. "
                 "Training from scratch remains available, but usually needs hours of audio and much longer training for intelligible speech.",
                 gr.update(value=False, interactive=False),
             )
         msg = f"🟢 **Piper TTS** has a `{language}` training checkpoint: `{checkpoint_info['id']}`.\n\n"
+        if phoneme_language != voice_language:
+            msg += f"Piper will use eSpeak voice `{phoneme_language}` for `{voice_language}`.\n\n"
         if use_pretrained:
             msg += "Fine-tuning will download and load this checkpoint."
         else:
@@ -723,11 +757,13 @@ def update_training_options(model_key, language, use_pretrained, pretrained_mode
                 msg += "Fine-tuning will download and use this pre-trained base model."
             else:
                 msg += "**Training from scratch** (random initialization). This means the model weights start completely blank."
+            if family == "tts" and model_key != "align_tts":
+                msg += "\n\nUFT checks the dataset's phoneme symbols before training. If the mapped checkpoint cannot represent them, select training from scratch."
             return msg, gr.update(interactive=True)
         else:
             msg = f"🟡 **{model_label}** has no pre-trained checkpoint mapped for `{language}`.\n\n"
             msg += "**Training from scratch** (random initialization) is required. *Training from scratch means the model starts with random weights and requires a larger dataset (hours of audio) and longer training (e.g. 100k+ steps) to sound intelligible.*\n\n"
-            msg += f"The backend adapts the recipe to the `{language}` phonemizer when available."
+            msg += f"The backend adapts the recipe and phoneme vocabulary to the `{language}` dataset when available."
             return msg, gr.update(value=False, interactive=False)
 
 
