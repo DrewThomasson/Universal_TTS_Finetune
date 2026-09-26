@@ -43,6 +43,7 @@ from utils.pipeline import (
     _json_ready,
 )
 from utils.model_registry import pretrained_model_choices
+from utils.e2a_export import export_e2a_zip
 
 
 def _print_json(payload: dict) -> None:
@@ -79,6 +80,7 @@ def _build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--transcript-file")
     prepare.add_argument("--language", default="en")
     prepare.add_argument("--whisper-model", default="small")
+    prepare.add_argument("--asr-backend", choices=["auto", "whisper", "mms"], default="auto")
     prepare.add_argument("--eval-percentage", type=float, default=0.15)
     prepare.add_argument("--min-segment-seconds", type=float, default=0.5)
     prepare.add_argument("--max-segment-seconds", type=float, default=12.0)
@@ -123,6 +125,7 @@ def _build_parser() -> argparse.ArgumentParser:
     workflow.add_argument("--transcript-file")
     workflow.add_argument("--language", default="en")
     workflow.add_argument("--whisper-model", default="small")
+    workflow.add_argument("--asr-backend", choices=["auto", "whisper", "mms"], default="auto")
     workflow.add_argument("--epochs", type=int, default=10)
     workflow.add_argument("--batch-size", type=int, default=8)
     workflow.add_argument("--grad-accum", type=int, default=1)
@@ -150,6 +153,7 @@ def _build_parser() -> argparse.ArgumentParser:
     batch_test.add_argument("--transcript-file")
     batch_test.add_argument("--language", default="en")
     batch_test.add_argument("--whisper-model", default="small")
+    batch_test.add_argument("--asr-backend", choices=["auto", "whisper", "mms"], default="auto")
     batch_test.add_argument("--epochs", type=int, default=1)
     batch_test.add_argument("--batch-size", type=int, default=8)
     batch_test.add_argument("--grad-accum", type=int, default=1)
@@ -168,6 +172,9 @@ def _build_parser() -> argparse.ArgumentParser:
     latest = subparsers.add_parser("latest-artifacts", help="Resolve the newest trained model artifacts.")
     latest.add_argument("--output-root", required=True)
     latest.add_argument("--model")
+    export = subparsers.add_parser("export-e2a", help="Package a trained model for E2A custom model upload.")
+    export.add_argument("--artifacts", required=True)
+    export.add_argument("--output-file", required=True)
     return parser
 
 
@@ -177,6 +184,10 @@ def main() -> None:
 
     if args.command == "list-models":
         _print_json({"models": list_supported_models()})
+        return
+
+    if args.command == "export-e2a":
+        _print_json(export_e2a_zip(load_artifacts(args.artifacts), args.output_file))
         return
 
     if args.command == "list-checkpoints":
@@ -196,6 +207,7 @@ def main() -> None:
             transcript_file=args.transcript_file,
             language=args.language,
             whisper_model_name=args.whisper_model,
+            asr_backend=args.asr_backend,
             eval_percentage=args.eval_percentage,
             min_segment_seconds=args.min_segment_seconds,
             max_segment_seconds=args.max_segment_seconds,
@@ -252,6 +264,7 @@ def main() -> None:
             transcript_file=args.transcript_file,
             language=args.language,
             whisper_model_name=args.whisper_model,
+            asr_backend=args.asr_backend,
             diarize_speakers=args.diarize_speakers,
             expected_speakers=args.expected_speakers,
             diarize_threshold=args.diarize_threshold,
@@ -295,6 +308,7 @@ def main() -> None:
             transcript_file=args.transcript_file,
             language=args.language,
             whisper_model_name=args.whisper_model,
+            asr_backend=args.asr_backend,
             diarize_speakers=args.diarize_speakers,
             expected_speakers=args.expected_speakers,
             diarize_threshold=args.diarize_threshold,

@@ -587,6 +587,7 @@ def prepare_dataset(
     transcript_file: str | None = None,
     language: str = "en",
     whisper_model_name: str = "small",
+    asr_backend: str = "auto",
     eval_percentage: float = DEFAULT_EVAL_PERCENTAGE,
     shuffle_seed: int = DEFAULT_SHUFFLE_SEED,
     min_segment_seconds: float = DEFAULT_MIN_SEGMENT_SECONDS,
@@ -668,23 +669,30 @@ def prepare_dataset(
 
     transcript_map = {} if (global_is_vtt or not transcript_file) else _load_transcript_map(transcript_file)
     
-    # Check if Whisper is needed for any of the files in the batch
-    use_whisper = False
+    # Exact transcripts and alignment files always take precedence over ASR.
+    use_asr = False
     if not transcript_file:
         for audio_file in resolved_audio_files:
             audio_path = Path(audio_file).expanduser().resolve()
             if not audio_path.with_suffix(".vtt").exists() and not audio_path.with_suffix(".txt").exists():
-                use_whisper = True
+                use_asr = True
                 break
     else:
-        use_whisper = not transcript_map and not global_is_vtt
+        use_asr = not transcript_map and not global_is_vtt
 
-    asr_model: WhisperModel | None = None
-    if use_whisper:
+    asr_model = None
+    selected_asr = None
+    if use_asr:
+        from utils.asr import MMSTranscriber, select_asr_backend
+        selected_asr = select_asr_backend(asr_backend, language)
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        compute_type = "float16" if torch.cuda.is_available() else "float32"
-        _notify(progress, f"Loading Whisper model '{whisper_model_name}' on {device}...")
-        asr_model = WhisperModel(whisper_model_name, device=device, compute_type=compute_type, download_root=str(_MODELS_DIR))
+        if selected_asr == "mms":
+            _notify(progress, f"Loading MMS ASR adapter for '{language}' on {device}...")
+            asr_model = MMSTranscriber(language, str(_MODELS_DIR), device)
+        else:
+            compute_type = "float16" if torch.cuda.is_available() else "float32"
+            _notify(progress, f"Loading Whisper model '{whisper_model_name}' on {device}...")
+            asr_model = WhisperModel(whisper_model_name, device=device, compute_type=compute_type, download_root=str(_MODELS_DIR))
 
     entries: list[dict[str, Any]] = []
     total_seconds = 0.0
@@ -726,7 +734,7 @@ def prepare_dataset(
                 )
                 local_is_vtt = True
             else:
-                _notify(progress, f"⚠️ No matching VTT or TXT found for {audio_path.name}. Whisper will be used to transcribe.")
+                _notify(progress, f"No matching VTT or TXT found for {audio_path.name}. {selected_asr} ASR will transcribe it.")
 
         # 2. Get audio metadata and optionally convert to temporary WAV for fast seeking
         temp_wav_path = None
@@ -850,16 +858,19 @@ def prepare_dataset(
             continue
 
         assert asr_model is not None
-        segments, _ = asr_model.transcribe(
-            str(audio_path),
-            language=language,
-            vad_filter=True,
-            word_timestamps=True,
-            condition_on_previous_text=False,
-        )
-        words = _extract_transcribed_words(segments)
+        if selected_asr == "mms":
+            words = asr_model.transcribe_words(str(audio_path))
+        else:
+            segments, _ = asr_model.transcribe(
+                str(audio_path),
+                language=language.lower().replace("_", "-").split("-", 1)[0],
+                vad_filter=True,
+                word_timestamps=True,
+                condition_on_previous_text=False,
+            )
+            words = _extract_transcribed_words(segments)
         if not words:
-            _notify(progress, f"Warning: Whisper did not return timestamped words for {audio_path.name}. Skipping this file.")
+            _notify(progress, f"Warning: {selected_asr} ASR did not return timestamped words for {audio_path.name}. Skipping this file.")
             continue
 
         clip_index = 0
