@@ -756,13 +756,17 @@ def update_training_options(model_key, language, use_pretrained, pretrained_mode
             if use_pretrained:
                 msg += "Fine-tuning will download and use this pre-trained base model."
             else:
-                msg += "**Training from scratch** (random initialization). This means the model weights start completely blank."
+                msg += (
+                    "**Training from scratch** (random initialization). The model weights start blank, "
+                    "so it must learn this language and speech from your dataset. Expect hours of audio "
+                    "and substantially longer training for intelligible speech."
+                )
             if family == "tts" and model_key != "align_tts":
                 msg += "\n\nUFT checks the dataset's phoneme symbols before training. If the mapped checkpoint cannot represent them, select training from scratch."
             return msg, gr.update(interactive=True)
         else:
             msg = f"🟡 **{model_label}** has no pre-trained checkpoint mapped for `{language}`.\n\n"
-            msg += "**Training from scratch** (random initialization) is required. *Training from scratch means the model starts with random weights and requires a larger dataset (hours of audio) and longer training (e.g. 100k+ steps) to sound intelligible.*\n\n"
+            msg += "**Training from scratch** (random initialization) is required. The model must learn this language and speech from your dataset; expect hours of audio and substantially longer training for intelligible speech.\n\n"
             msg += f"The backend adapts the recipe and phoneme vocabulary to the `{language}` dataset when available."
             return msg, gr.update(value=False, interactive=False)
 
