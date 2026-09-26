@@ -31,6 +31,7 @@ class ModelSpec:
 
 
 MODEL_SPECS = (
+    ModelSpec(key="f5_tts", label="F5-TTS v1 (English / Chinese)", recipe_dir="", train_script="", family="f5_tts", official_model_id="SWivid/F5-TTS/F5TTS_v1_Base", supports_language=True, notes="Optional isolated F5-TTS runtime; published English/Chinese base."),
     ModelSpec(
         key="align_tts",
         label="Align TTS",
@@ -290,6 +291,8 @@ def pretrained_model_choices(model_key: str, language: str) -> tuple[str, ...]:
         language = language.lower().replace("_", "-")
         return (spec.official_model_id,) if language in OMNIVOICE_LANGUAGES else ()
     language = normalize_language(language)
+    if model_key == "f5_tts":
+        return (spec.official_model_id,) if language in {"en", "zh-cn"} else ()
     if model_key == "styletts2":
         return (spec.official_model_id,) if language == "en" else ()
     if spec.family == "xtts":

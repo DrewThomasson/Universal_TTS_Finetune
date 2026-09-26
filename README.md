@@ -1,6 +1,6 @@
 # Universal TTS Finetune
 
-Prepare voice recordings, fine-tune a TTS model, and try it in a browser. This tool runs separately from [ebook2audiobook](https://github.com/DrewThomasson/ebook2audiobook) and offers 19 training engines, including optional StyleTTS2 and OmniVoice fine-tuning.
+Prepare voice recordings, fine-tune a TTS model, and try it in a browser. This tool runs separately from [ebook2audiobook](https://github.com/DrewThomasson/ebook2audiobook) and offers 20 training engines, including optional StyleTTS2, OmniVoice and F5-TTS fine-tuning.
 
 ![Universal TTS Finetune web GUI showing dataset preparation](assets/web_gui.png)
 
@@ -98,3 +98,17 @@ python headless_cli.py train \
 The checkpoint list includes only mapped starting models for that engine and language. Use `--pretrained-model-id` to select one explicitly, or omit it for the default. Coqui and Piper can use `--no-pretrained` to start from random weights; the CLI warns that this needs much more audio and training. XTTS and MMS/Fairseq require a starting checkpoint. `python headless_cli.py --help` lists the other commands; each command also has `--help`.
 
 For the E2A FAIRSEQ engine, choose **MMS / Fairseq VITS** in the GUI and select the matching language from [Meta's MMS catalog](https://dl.fbaipublicfiles.com/mms/tts/all-tts-languages.html). The CLI uses the published code, for example `--model mms_vits --language eng`. The finished run's `ready/fairseq/` folder contains `G_100000.pth`, `config.json`, and `vocab.txt` in the published MMS checkpoint layout.
+
+### F5-TTS (optional)
+
+Fine-tune the official F5-TTS v1 base in English (`en`) or Chinese (`zh-cn`). Install CUDA-compatible PyTorch and `f5-tts==1.1.22` in a separate Python environment, then set:
+
+```bash
+export UFT_F5TTS_PYTHON=/path/to/f5-env/bin/python
+```
+
+Select **F5-TTS v1**, your prepared dataset and its language. Start with batch size 1 and short clips. UFT downloads the official base on first training and Vocos on first inference. Training uses the official trainer, mixed precision and 8-bit Adam; generated data stays in your output folder.
+
+The finished artifact includes online model weights, vocabulary and a reference clip with its exact text. CLI and GUI inference use that reference without transcription. Other languages, custom reference audio, scratch training, resume, periodic audio samples and E2A export are not exposed. The base Docker image excludes this optional runtime; mount your separate environment and cache when using it with Docker.
+
+[Official project](https://github.com/SWivid/F5-TTS): MIT code; the official pretrained weights are CC-BY-NC-4.0.

@@ -1707,11 +1707,11 @@ def train_model(
         raise ValueError(f"{spec.label} does not support language {language}.")
     if spec.family == "mms" and not pretrained_model_choices(model_key, language):
         raise ValueError(f"{spec.label} has no published checkpoint for language {language}.")
-    if spec.family in {"styletts2", "omnivoice"} and not pretrained_model_choices(model_key, language):
+    if spec.family in {"styletts2", "omnivoice", "f5_tts"} and not pretrained_model_choices(model_key, language):
         raise ValueError(f"{spec.label} has no supported starting checkpoint for language {language}.")
     if spec.family in {"xtts", "mms"} and not use_pretrained and not restore_path:
         raise ValueError(f"{spec.label} requires a starting checkpoint; --no-pretrained needs --restore-path.")
-    if spec.family in {"styletts2", "omnivoice"} and not use_pretrained:
+    if spec.family in {"styletts2", "omnivoice", "f5_tts"} and not use_pretrained:
         raise ValueError(f"{spec.label} requires pretrained loading; training from scratch is not supported by this UFT adapter.")
     if model_key == "align_tts" and language != "en":
         raise ValueError("Align TTS currently uses an English-only character vocabulary.")
@@ -1743,6 +1743,20 @@ def train_model(
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     training_root = output_root_path / "training_runs" / model_key / timestamp
     training_root.mkdir(parents=True, exist_ok=True)
+
+    if spec.family == "f5_tts":
+        if sample_epoch_interval:
+            raise ValueError("F5-TTS does not support periodic training samples in UFT.")
+        if pretrained_model_id and pretrained_model_id not in pretrained_model_choices(model_key, language):
+            raise ValueError(f"Unsupported F5-TTS base checkpoint: {pretrained_model_id}.")
+        overrides = json.loads(extra_overrides_json) if extra_overrides_json else {}
+        if not isinstance(overrides, dict) or set(overrides) - {"f5tts_python"}:
+            raise ValueError("F5-TTS accepts only the f5tts_python config override.")
+        from utils.f5tts_utils import train_f5tts
+        return train_f5tts(dataset_dir=dataset_root, training_root=training_root, language=language,
+                           epochs=epochs, batch_size=batch_size, grad_accum=grad_accum,
+                           max_audio_seconds=max_audio_seconds, restore_path=restore_path,
+                           python_executable=overrides.get("f5tts_python"), dry_run=dry_run, progress=progress)
 
     if spec.family in {"styletts2", "omnivoice"}:
         if grad_accum != 1:
@@ -2213,7 +2227,10 @@ def synthesize(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     speaker_reference = speaker_wav or artifacts.get("reference_wav")
 
-    if artifacts.get("family") == "styletts2":
+    if artifacts.get("family") == "f5_tts":
+        from utils.f5tts_utils import synthesize_f5tts
+        output_path = synthesize_f5tts(artifacts, text, language, speaker_reference, output_path, progress)
+    elif artifacts.get("family") == "styletts2":
         from utils.styletts2_infer import synthesize_styletts2
         return synthesize_styletts2(
             artifacts=artifacts,
