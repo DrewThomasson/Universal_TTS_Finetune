@@ -1,207 +1,70 @@
-> [!IMPORTANT]
-> This repo is being integrated into [Ebook2audiobook](https://github.com/DrewThomasson/ebook2audiobook/tree/main/components/Universal_TTS_Finetune/) Further development can be found there, if not added yet it can be found in a PR in progress 
+# Universal TTS Finetune
 
-# Universal_TTS_Finetune
+Prepare voice recordings, fine-tune a TTS model, and try it in a browser. This tool runs separately from [ebook2audiobook](https://github.com/DrewThomasson/ebook2audiobook) and supports 16 Coqui and Piper training engines.
 
-Universal Coqui & Rhasspy Piper TTS fine-tuning workflow with:
-- a Gradio web GUI
-- a headless CLI
-- LJSpeech-style dataset generation from your own audio
-- optional automatic transcription with Whisper when transcripts are not provided
-- quick post-training inference for the model you just trained
+![Universal TTS Finetune web GUI showing dataset preparation](assets/web_gui.png)
 
-## Supported models
+## Quick start with Docker
 
-The current workflow targets the bundled `recipes/ljspeech` training recipes for these Coqui models:
+Clone this repo into an E2A checkout, or clone it elsewhere if you prefer:
 
-- Align TTS
-- DelightfulTTS
-- FastPitch
-- FastSpeech
-- FastSpeech 2
-- Glow-TTS
-- NeuralHMM-TTS
-- Overflow
-- SpeedySpeech
-- Tacotron2 Capacitron
-- Tacotron2 DCA
-- Tacotron2 DDC
-- VITS
-- XTTS v1
-- XTTS v2
-- Piper TTS (Rhasspy)
-
-When Coqui publishes a matching pretrained checkpoint, the trainer can auto-download it and continue from it. Otherwise the workflow still prepares the recipe workspace and can train from a user-supplied checkpoint or recipe defaults.
-
-## What it does
-
-### 1. Prepare a dataset
-
-Point the app at audio files or a folder of audio.
-
-- If you provide a transcript map (`csv`, `tsv`, `txt`, or `json`), it uses that text.
-- If you do not provide text, it transcribes with Whisper and chunks longer recordings into sentence-sized clips.
-- **Speaker Diarization**: Optionally enable speaker diarization to separate multiple speakers into distinct datasets. This uses a high-performance **PyAnnote ResNet-34 VoxCeleb** speaker model (`pyannote/wespeaker-voxceleb-resnet34-LM`) to extract embeddings and group clips by voice. You can configure:
-  - **Expected Speakers**: Force the clustering into exactly N speaker folders.
-  - **Distance Threshold**: Fine-tune the sensitivity of auto-detecting speakers when expected speakers is set to 0.
-- **Re-diarization**: Once a dataset has been prepared, the original mixed audio clips are preserved. You can re-diarize the dataset with new speaker counts or thresholds via the web GUI without re-running the slow Whisper transcription step.
-- It writes an LJSpeech-style dataset under:
-
-```text
-<output_root>/dataset/LJSpeech-1.1/
+```bash
+cd /path/to/ebook2audiobook/components
+git clone https://github.com/DrewThomasson/Universal_TTS_Finetune.git
+cd Universal_TTS_Finetune
+docker compose up --build
 ```
 
-including:
-- `wavs/`
-- `metadata.csv`
-- `metadata_shuf.csv`
-- `metadata_train.csv`
-- `metadata_val.csv`
-- `dataset_info.json`
-
-### 2. Train or fine-tune a model
-
-Pick one of the supported Coqui recipes, then train from the GUI or CLI.
-
-Training artifacts are written under:
-
-```text
-<output_root>/training_runs/<model>/<timestamp>/ready/
-```
-
-with an `artifacts.json` file that the GUI and CLI can load later.
-
-### 3. Test the trained model
-
-After training, load the generated `artifacts.json` (or the training folder) and synthesize test audio.
-
-- XTTS models use a speaker reference WAV.
-- Single-speaker recipe models synthesize directly.
+Open **http://localhost:7862**. Put local recordings in `audio_data/` and use `/app/audio_data` in the GUI. Datasets and trained models persist in `finetune_models/`; downloaded base models persist in `models/`. The supplied Compose file requests an NVIDIA GPU and needs the NVIDIA Container Toolkit.
 
 ## Install
 
-Install the required dependencies using pip:
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and use a separate Python 3.12 environment:
 
 ```bash
-pip install -r requirements.txt
+cd /path/to/ebook2audiobook/components/Universal_TTS_Finetune
+uv venv --python 3.12 .venv
+source .venv/bin/activate
+uv pip install -r requirements.txt
+python web_gui.py
 ```
 
-## Run the web GUI
+On Windows, activate with `.venv\Scripts\activate` instead. Open **http://localhost:7862**. You can set `--out_path /path/to/output` and `--port 7862` when launching the GUI. A CUDA GPU speeds up training; CPU training can be slow. A native install under E2A's `components/` folder shares its `models/` cache; a standalone clone keeps downloads in its own `models/` folder.
 
-Run the application directly with Python:
+## Fine-tune in three steps
 
-```bash
-python web_gui.py --port 5003 --out_path /absolute/path/to/output
-```
+1. **Prepare dataset:** Add audio clips and, if you have them, matching transcripts. You can also supply an E2A audiobook with its matching `.vtt` file. Without transcripts, the app uses Whisper. Select the dataset language and create the dataset.
+2. **Train model:** Select the dataset, engine, and fine-tuning language. Choose a published **starting checkpoint** when one is available, then start training. Piper choices show language, locale, voice, and quality. A ready-to-speak Piper ONNX voice is different from a training checkpoint; UFT does not silently substitute an English checkpoint.
+3. **Inference:** Select the finished run and generate a short sample. XTTS also needs a speaker reference WAV.
 
-## Run with Docker
+<details>
+<summary>See the model and starting-checkpoint controls</summary>
 
-To run the application using Docker, simply use `docker-compose`. This handles installing all system dependencies and setting up GPU support automatically:
+![UFT training tab with model, language, and starting checkpoint choices](assets/train_gui.png)
 
-```bash
-docker-compose up --build
-```
+</details>
 
-The application will be available at `http://localhost:5003`.
+The app stores prepared data under `<output_root>/dataset/` and finished models under `<output_root>/training_runs/<model>/<run>/ready/`. Keep `artifacts.json` with the model files so UFT can load the run later.
 
-## Headless CLI
+For an XTTSv2 model you want to use in E2A, follow E2A's [custom model ZIP instructions](https://github.com/DrewThomasson/ebook2audiobook#example-of-custom-model-zip-upload). The XTTSv2 `ready/` folder contains the trained model, config, vocabulary, and reference audio needed for that package; E2A expects the reference audio named `ref.wav`.
 
-*Note: By default, the training commands (`train` and `workflow`) will stream live training logs to your console so you can see progress in real time. If you prefer to suppress this output (e.g., when running in a background job), you can pass the `--no-stream-logs` flag.*
+## Command line
 
-List models:
+The same local environment also provides `headless_cli.py`. For example, with short Spanish WAV clips and a CSV whose columns are `audio,text`:
 
 ```bash
 python headless_cli.py list-models
-```
-
-Prepare a dataset from a folder of audio and auto-transcribe with Whisper:
-
-```bash
+python headless_cli.py list-checkpoints --model vits_tts --language es
 python headless_cli.py prepare-dataset \
-  --output-root /absolute/path/to/output \
-  --audio-dir /absolute/path/to/audio \
-  --language en \
-  --whisper-model small \
-  --diarize-speakers
-```
-
-*Note: The `--diarize-speakers` flag is optional. If provided, the pipeline will extract speaker embeddings using a pre-trained **PyAnnote ResNet-34** speaker model and cluster them by distinct speakers. You can optionally specify `--expected-speakers <count>` to cluster into exactly that many speakers, or adjust `--diarize-threshold <float>` to control auto-detection sensitivity. It will output separate datasets (e.g., `dataset/LJSpeech-1.1_Speaker_1/`) and default to returning the speaker with the most training data.*
-
-Prepare a dataset using an existing transcript file:
-
-```bash
-python headless_cli.py prepare-dataset \
-  --output-root /absolute/path/to/output \
-  --audio-dir /absolute/path/to/audio \
-  --transcript-file /absolute/path/to/metadata.csv
-```
-
-Dry-run a training workspace:
-
-```bash
+  --audio-dir /path/to/wavs \
+  --transcript-file /path/to/transcripts.csv \
+  --language es \
+  --output-root ./finetune_models
 python headless_cli.py train \
-  --model xtts_v2 \
-  --output-root /absolute/path/to/output \
-  --dry-run
+  --model vits_tts \
+  --language es \
+  --dataset-dir ./finetune_models/dataset/LJSpeech-1.1 \
+  --output-root ./finetune_models
 ```
 
-Train a model:
-
-```bash
-python headless_cli.py train \
-  --model glow_tts \
-  --output-root /absolute/path/to/output \
-  --epochs 50 \
-  --batch-size 16
-```
-
-Run the whole workflow in one command:
-
-```bash
-python headless_cli.py workflow \
-  --model xtts_v2 \
-  --output-root /absolute/path/to/output \
-  --audio-dir /absolute/path/to/audio \
-  --language en \
-  --test-text "This is a quick validation sample."
-```
-
-Test all supported models sequentially on a dataset, saving sample audio and discarding the checkpoints to save space:
-
-```bash
-python headless_cli.py batch-test \
-  --output-root /absolute/path/to/output \
-  --audio-dir /absolute/path/to/audio \
-  --language en \
-  --discard-models \
-  --auto-calculate-epochs \
-  --diarize-speakers
-```
-
-*Note: The `--auto-calculate-epochs` flag ignores the `--epochs` argument and dynamically computes the optimal number of epochs for each model family (e.g., targeting 1,500 steps for XTTS and 15,000 steps for Tacotron2) based on the exact size of your provided dataset.*
-
-Generate speech from the newest trained model:
-
-```bash
-python headless_cli.py synthesize \
-  --artifacts /absolute/path/to/output \
-  --model xtts_v2 \
-  --text "Testing the fine-tuned voice." \
-  --language en
-```
-
-## Transcript file formats
-
-Accepted transcript formats:
-- `json` dictionary or list of objects
-- `csv`
-- `tsv`
-- pipe-delimited text
-
-The audio key can be an absolute path, file name, or stem. The text field can be named `text`, `transcript`, `sentence`, or `utterance`.
-
-## Notes
-
-- The workflow automatically uses CUDA when available and falls back to CPU otherwise.
-- XTTS models are the best option when you need multilingual fine-tuning or speaker-conditioned inference.
-- Some upstream Coqui recipes still depend on recipe-specific assumptions. If you need deeper tuning, use the `extra_overrides_json` field/flag to override recipe values before launch.
+The checkpoint list includes only mapped starting models for that engine and language. Use `--pretrained-model-id` to select one explicitly, or omit it for the default. `python headless_cli.py --help` lists the other commands; each command also has `--help`.
