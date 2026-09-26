@@ -97,7 +97,7 @@ def _build_parser() -> argparse.ArgumentParser:
     train.add_argument("--dataset-dir")
     train.add_argument("--language", default="en")
     train.add_argument("--epochs", type=int, default=10)
-    train.add_argument("--batch-size", type=int, default=None, help="Training batch size (default: 2 for StyleTTS2, 8 for other models)")
+    train.add_argument("--batch-size", type=int, default=None, help="Training batch size (default: 1 for OmniVoice, 2 for StyleTTS2, 8 for other models)")
     train.add_argument("--grad-accum", type=int, default=1)
     train.add_argument("--max-audio-seconds", type=int, default=11)
     train.add_argument("--restore-path")
@@ -227,7 +227,7 @@ def main() -> None:
             dataset_dir=args.dataset_dir,
             language=args.language,
             epochs=args.epochs,
-            batch_size=args.batch_size if args.batch_size is not None else (2 if args.model == "styletts2" else 8),
+            batch_size=args.batch_size if args.batch_size is not None else (1 if args.model == "omnivoice" else 2 if args.model == "styletts2" else 8),
             grad_accum=args.grad_accum,
             max_audio_seconds=args.max_audio_seconds,
             restore_path=args.restore_path,
@@ -276,7 +276,7 @@ def main() -> None:
             dataset_dir=dataset["dataset_dir"],
             language=args.language,
             epochs=args.epochs,
-            batch_size=args.batch_size if args.batch_size is not None else (2 if args.model == "styletts2" else 8),
+            batch_size=args.batch_size if args.batch_size is not None else (1 if args.model == "omnivoice" else 2 if args.model == "styletts2" else 8),
             grad_accum=args.grad_accum,
             max_audio_seconds=args.max_audio_seconds,
             restore_path=args.restore_path,
