@@ -1747,8 +1747,8 @@ def train_model(
     if spec.family == "styletts2":
         if grad_accum != 1:
             raise ValueError(f"{spec.label} currently requires gradient accumulation 1 in UFT.")
-        if batch_size != 1:
-            raise ValueError(f"{spec.label} currently requires batch size 1 in UFT.")
+        if batch_size != 2:
+            raise ValueError(f"{spec.label} currently requires batch size 2 in UFT; the upstream predictor fails with batch size 1.")
         if sample_epoch_interval:
             raise ValueError(f"{spec.label} does not support periodic audio samples during training.")
         if pretrained_model_id and pretrained_model_id not in pretrained_model_choices(model_key, language):

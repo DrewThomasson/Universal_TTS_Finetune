@@ -29,8 +29,8 @@ os.chdir(repo)
 import numpy as np
 import torch, yaml, librosa, torchaudio
 from munch import Munch
-from models import build_model
-from utils import recursive_munch, load_ASR_models, load_F0_models
+from models import build_model, load_ASR_models, load_F0_models
+from utils import recursive_munch
 from text_utils import TextCleaner
 from Utils.PLBERT.util import load_plbert
 from Modules.diffusion.sampler import DiffusionSampler, ADPM2Sampler, KarrasSchedule
@@ -81,7 +81,7 @@ def length_to_mask(lengths):
     return torch.gt(mask + 1, lengths.unsqueeze(1))
 def infer(text, ref_s):
     phonemes = phonemizer_backend.phonemize([text.strip()])[0]
-    phonemes = ' '.join(word_tokenize(phonemes))
+    phonemes = ' '.join(word_tokenize(phonemes, preserve_line=True))
     tokens = cleaner(phonemes); tokens.insert(0, 0)
     tokens = torch.LongTensor(tokens).to(device).unsqueeze(0)
     with torch.no_grad():
