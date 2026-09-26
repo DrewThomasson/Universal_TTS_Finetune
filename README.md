@@ -64,11 +64,13 @@ Completed runs store their LoRA checkpoint, base model, and isolated interpreter
 Use Linux with at least 16 GiB total and 12 GiB free GPU memory for this guarded profile. The base Docker image does not include OmniVoice's optional environment. For example, install a CUDA-compatible PyTorch build in a separate environment, then:
 
 ```bash
-/path/to/omni-env/bin/python -m pip install omnivoice==0.2.1 'peft>=0.20'
+/path/to/omni-env/bin/python -m pip install 'git+https://github.com/k2-fsa/OmniVoice.git@08be0b4ccbac3e13e374e86fbfead4b4cac343e2' 'peft>=0.20'
 export UFT_OMNIVOICE_PYTHON=/path/to/omni-env/bin/python
 ```
 
 Cache `k2-fsa/OmniVoice`, `eustlb/higgs-audio-v2-tokenizer`, and `Qwen/Qwen3-0.6B` in the same Hugging Face cache used by UFT (`UFT_MODELS_DIR`) before training. Keep that cache available for inference; the packaged LoRA adapter needs its base model.
+
+Use the pinned official source revision above: the PyPI `0.2.1` wheel lacks the required LoRA APIs.
 
 For an E2A custom voice, load the finished run in **Inference** and click **Create E2A upload ZIP**. This supports XTTS v1/v2, VITS, MMS/Fairseq VITS, and Piper, and packages the exact filenames E2A requires. Other UFT engines are not accepted by E2A's custom model upload. You can also run `python headless_cli.py export-e2a --artifacts /path/to/ready/artifacts.json --output-file /path/to/voice.zip`.
 
