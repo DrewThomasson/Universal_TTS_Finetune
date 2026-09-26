@@ -205,7 +205,7 @@ class InferenceDispatchTests(unittest.TestCase):
             ("tacotron2_ddc", "tts"), ("vits_tts", "tts"), ("mms_vits", "mms"),
             ("xtts_v1", "xtts"), ("xtts_v2", "xtts"), ("piper", "piper"),
         ]}
-        self.assertEqual(gui_keys, expected_keys | {"styletts2", "omnivoice"})
+        self.assertEqual(gui_keys, expected_keys | {"styletts2", "omnivoice", "f5_tts"})
 
     def test_gui_run_inference_delegates_once_to_pipeline(self):
         with tempfile.TemporaryDirectory() as temp_dir:
