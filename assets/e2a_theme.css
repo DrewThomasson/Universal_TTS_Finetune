@@ -1,0 +1,51 @@
+/* The same navy surfaces, amber actions, and green links used by Ebook2Audiobook. */
+body.dark .gradio-container {
+    --body-background-fill: #0b0f19;
+    --background-fill-primary: #0b0f19;
+    --background-fill-secondary: #1f2937;
+    --block-background-fill: #1f2937;
+    --block-border-color: #374151;
+    --input-background-fill: #1f2937;
+    --input-border-color: #374151;
+    --body-text-color: #f3f4f6;
+    --body-text-color-subdued: #cbd5e1;
+    --link-text-color: #22c55e;
+    --color-accent: #ffab00;
+    --color-accent-soft: rgba(255, 171, 0, 0.16);
+    background: #0b0f19 !important;
+}
+
+.gradio-container a {
+    color: #22c55e;
+}
+
+.gradio-container button[role="tab"][aria-selected="true"] {
+    color: #ffab00 !important;
+    border-color: #ffab00 !important;
+}
+
+.gradio-container .primary-btn {
+    background: #d68215 !important;
+    border: 1px solid #d68215 !important;
+    color: #fff !important;
+}
+
+.gradio-container .primary-btn:hover {
+    background: #34d058 !important;
+    border-color: #34d058 !important;
+    color: #0b0f19 !important;
+}
+
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #c09340;
+    border-radius: 6px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #ff8c00;
+}

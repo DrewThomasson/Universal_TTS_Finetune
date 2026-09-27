@@ -896,26 +896,23 @@ if __name__ == "__main__":
         font_mono=["JetBrains Mono", "monospace", "Consolas", "Menlo", "Liberation Mono"],
     )
 
-    css_str = """
-    .primary-btn {
-        background: linear-gradient(90deg, #22c55e 0%, #eab308 100%) !important;
-        color: white !important;
-        border: none !important;
-        transition: transform 0.15s ease, box-shadow 0.15s ease !important;
-    }
-    .primary-btn:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 4px 12px rgba(34, 197, 94, 0.4) !important;
-    }
-    .primary-btn:active {
-        transform: translateY(0);
-    }
-    """
+    css_str = (Path(__file__).parent / "assets" / "e2a_theme.css").read_text(encoding="utf-8")
+    # Match E2A's dark GUI by default while allowing an explicit light-theme URL.
+    default_dark = """<script>
+    (() => {
+        const url = new URL(window.location.href);
+        if (!url.searchParams.has("__theme")) {
+            url.searchParams.set("__theme", "dark");
+            window.location.replace(url.toString());
+        }
+    })();
+    </script>"""
 
-    with gr.Blocks(title='Universal TTS Finetune', theme=theme, css=css_str) as demo:
+    with gr.Blocks(title='Universal TTS Finetune', theme=theme, css=css_str, head=default_dark) as demo:
         gr.Markdown(
             "# Universal TTS Finetune\n"
-            "Prepare an LJSpeech-style dataset, fine-tune a supported Coqui recipe, and test the trained model."
+            "[Ebook2Audiobook companion](https://github.com/DrewThomasson/ebook2audiobook)\n\n"
+            "Prepare a dataset, fine-tune a TTS model, and try the result."
         )
 
         with gr.Tab("1 - Prepare dataset"):
