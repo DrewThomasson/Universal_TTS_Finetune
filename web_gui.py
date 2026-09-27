@@ -50,7 +50,7 @@ from utils.pipeline import (
 )
 from utils.model_registry import MMS_LANGUAGES, OMNIVOICE_LANGUAGES, XTTS_LANGUAGES, pretrained_model_choices
 from utils.asr import MMS_ASR_LANGUAGES
-from utils.e2a_export import export_e2a_zip
+from utils.e2a_export import E2A_FILES, export_e2a_zip
 from utils.language_support import coqui_phoneme_language
 from utils.resource_guidance import training_resource_guidance
 
@@ -653,6 +653,10 @@ def on_model_change(selected_model):
     return (gr.update(visible=True), gr.update(visible=True)) if req else (gr.update(visible=False, value=None), gr.update(visible=False, value=None))
 
 
+def update_e2a_export_visibility(model_key):
+    return gr.update(visible=model_key in E2A_FILES)
+
+
 def on_select_speaker(selected_dir, speakers_state):
     if not selected_dir or not speakers_state:
         return gr.update(), "", None, "", gr.update()
@@ -1083,10 +1087,11 @@ if __name__ == "__main__":
             used_reference_audio = gr.Audio(label="Reference audio used")
             inspect_btn = gr.Button(value="Inspect artifacts")
             tts_btn = gr.Button(value="Step 3 - Generate speech", elem_classes=["primary-btn"])
-            gr.Markdown("### E2A custom model upload")
-            e2a_export_btn = gr.Button(value="Create E2A upload ZIP")
-            e2a_export_status = gr.Textbox(label="Export status", interactive=False)
-            e2a_export_file = gr.File(label="Download E2A ZIP", interactive=False)
+            with gr.Group() as e2a_export_group:
+                gr.Markdown("### E2A custom model upload")
+                e2a_export_btn = gr.Button(value="Create E2A upload ZIP")
+                e2a_export_status = gr.Textbox(label="Export status", interactive=False)
+                e2a_export_file = gr.File(label="Download E2A ZIP", interactive=False)
 
         prepare_btn.click(
             fn=preprocess_dataset,
@@ -1394,6 +1399,11 @@ if __name__ == "__main__":
             fn=on_model_change,
             inputs=[infer_model_key],
             outputs=[speaker_reference_audio, used_reference_audio],
+        )
+        infer_model_key.change(
+            fn=update_e2a_export_visibility,
+            inputs=[infer_model_key],
+            outputs=[e2a_export_group],
         )
         infer_model_key.change(
             fn=update_finetune_language_choices,
