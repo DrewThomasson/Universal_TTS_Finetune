@@ -31,6 +31,7 @@ class ModelSpec:
 
 
 MODEL_SPECS = (
+    ModelSpec(key="f5_tts", label="F5-TTS v1 (English / Chinese)", recipe_dir="", train_script="", family="f5_tts", official_model_id="SWivid/F5-TTS/F5TTS_v1_Base", supports_language=True, notes="Optional isolated F5-TTS runtime; published English/Chinese base."),
     ModelSpec(
         key="align_tts",
         label="Align TTS",
@@ -179,6 +180,26 @@ MODEL_SPECS = (
         supports_language=True,
         requires_speaker_wav=False,
     ),
+    ModelSpec(
+        key="styletts2",
+        label="StyleTTS2 (English)",
+        recipe_dir="",
+        train_script="",
+        family="styletts2",
+        official_model_id="yl4579/StyleTTS2-LibriTTS",
+        supports_language=True,
+        notes="Requires the official StyleTTS2 source and local LibriTTS checkpoint.",
+    ),
+    ModelSpec(
+        key="omnivoice",
+        label="OmniVoice (LoRA)",
+        recipe_dir="",
+        train_script="",
+        family="omnivoice",
+        official_model_id="k2-fsa/OmniVoice",
+        supports_language=True,
+        notes="Uses the optional isolated OmniVoice environment and its published language catalog.",
+    ),
 )
 
 MODEL_SPECS_BY_KEY = {spec.key: spec for spec in MODEL_SPECS}
@@ -188,6 +209,13 @@ MODEL_SPECS_BY_KEY = {spec.key: spec for spec in MODEL_SPECS}
 MMS_LANGUAGES = dict(
     line.split("\t", 1)
     for line in (REPO_ROOT / "assets" / "mms_languages.tsv").read_text(encoding="utf-8").splitlines()
+)
+
+# Published OmniVoice IDs, copied from the official lang_id_name_map.tsv.
+OMNIVOICE_LANGUAGES = dict(
+    (fields[0], fields[1])
+    for line in (REPO_ROOT / "assets" / "omnivoice_languages.tsv").read_text(encoding="utf-8").splitlines()[1:]
+    if len(fields := line.split("\t")) >= 2
 )
 
 # Published Coqui checkpoints whose model architecture matches an existing UFT
@@ -259,7 +287,14 @@ def pretrained_model_choices(model_key: str, language: str) -> tuple[str, ...]:
     if model_key == "mms_vits":
         language = language.lower()
         return (f"tts_models/{language}/fairseq/vits",) if language in MMS_LANGUAGES else ()
+    if model_key == "omnivoice":
+        language = language.lower().replace("_", "-")
+        return (spec.official_model_id,) if language in OMNIVOICE_LANGUAGES else ()
     language = normalize_language(language)
+    if model_key == "f5_tts":
+        return (spec.official_model_id,) if language in {"en", "zh-cn"} else ()
+    if model_key == "styletts2":
+        return (spec.official_model_id,) if language == "en" else ()
     if spec.family == "xtts":
         return (spec.official_model_id,) if spec.official_model_id and language in XTTS_LANGUAGES[model_key] else ()
     if language == "en":
