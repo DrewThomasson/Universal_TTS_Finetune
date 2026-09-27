@@ -35,17 +35,18 @@ Updated 2026-09-27. **Pass** means the linked report establishes that check. **�
 | xtts_v1 | 45 steps | Pass | — | — | en | 31296e7f |
 | xtts_v2 | 45 steps | Pass | — | — | en | 31296e7f |
 | piper | 90 / 24 batches | ONNX | — | — | es_ES / es_MX | 3ae2798c |
-| mms_vits (Fairseq) | 50 steps | Pass | —* | — | eng | e36d0a6 |
+| mms_vits (Fairseq) | 50 prior / 7 Aceh steps | Pass | Pass: ace | Pass: ace callback | eng / ace | e36d0a6 / ff78d51 |
 | styletts2 | 2 CPU / 2 CUDA steps | Pass | Pass | Pass + browser | en | bcb16b7 / 0e14574; inference 80e9f7d |
 | omnivoice | 2 CPU / 2 CUDA LoRA steps | Pass | Pass: en/es | Pass: es + browser | en | 0e14574; device-switch retest below |
 | f5_tts | 11 / 3 steps | Pass | Pass: en/zh-cn | Pass: en/zh-cn | en / zh-cn | 3562404 |
 
-* MMS's exported model reloaded and generated a valid WAV; a separate CLI inference check is not established by its report.
+* The earlier English MMS export reloaded and generated a WAV; the Aceh retest established separate CLI and GUI callback inference.
 
 ## Coverage and limitations
 
 - CPU optimizer steps are recorded for Align TTS, Piper, StyleTTS2 and OmniVoice. The other 16 engines have not established CPU training passes here. Align completed four steps in a bounded 16 GiB / 4 CPU container; Piper completed 8/8 CPU batches (ONNX export was not rerun).
-- The original 16 engines have historical training/packaging passes across several E2A component commits. Shared GUI/Docker checks do not establish actual GUI inference for each engine. MMS's exported model reloaded and generated audio; its earlier Docker runtime check was blocked.
+- The original 16 engines have historical training/packaging passes across several E2A component commits. Shared GUI/Docker checks do not establish actual GUI inference for each engine. MMS's earlier Docker runtime check was blocked.
+- MMS/Fairseq VITS completed seven CUDA optimizer steps on eight synthetic Aceh clips, then packaged and reloaded the language-matched artifact for CLI and GUI callback inference. Its default mapped checkpoint download also passed after fixing the model-directory path. MMS ASR transcribed all eight clips without supplied transcripts; normalized character error was 11.4% on this tiny MMS-generated set, which is not a native-speaker benchmark. The Aceh test does not verify every MMS language, GUI browser operation, or Docker. The MMS checkpoint license is CC BY-NC 4.0.
 - StyleTTS2 and OmniVoice passed automatic runtime setup, real CPU and CUDA training, packaging, CLI inference, GUI callbacks and browser audio playback. These were short synthetic English smoke datasets: StyleTTS2 used four training/two evaluation clips, batch two; OmniVoice used two training/one evaluation clips, batch one. Both completed one epoch and two optimizer steps on each device.
 - StyleTTS2 was tested on a 12 GB RTX 3060 and CPU. English is the supported language. The CPU/12 GB guarded profile trains the initial acoustic stage and skips joint SLM adversarial training. A moved artifact reloaded through the CLI, browser and Docker; pinned WavLM assets and automatic runtime relocation were checked. Initial CPU device errors and an incomplete validation batch were fixed and retried; full failure tracebacks were retained locally.
 - OmniVoice was trained on CPU and a rented 24 GB RTX 3090; English/Spanish inference passed. The 646 published language IDs were catalog-validated, not individually trained. Scratch training, local resume, reference voice cloning and E2A export are not exposed for its LoRA adapter. The cloud instance was destroyed after collecting results; an independent account check found zero instances.
