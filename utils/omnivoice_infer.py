@@ -49,11 +49,15 @@ def synthesize_omnivoice(artifacts: dict, text: str, language: str, output_path:
         raise FileNotFoundError(f"OmniVoice Python override not found: {override}")
     base_model = artifacts.get("base_model") or artifacts.get("pretrained_model_id", "k2-fsa/OmniVoice")
     hf_home = artifacts.get("hf_home")
+    from setup_omnivoice import runtime_python, setup, is_ready, _manifest
+    managed_python = runtime_python().absolute()
+    upgrade_cuda = (device == "cuda" and not override and python
+                    and Path(python).expanduser().absolute() == managed_python
+                    and not is_ready(cuda=True))
     # A saved interpreter/cache can belong to another host or container.
     # Recreate the managed runtime locally instead of executing stale paths.
     missing_base = Path(base_model).is_absolute() and not Path(base_model).is_dir()
-    if not python or not shutil.which(str(python)) or missing_base:
-        from setup_omnivoice import setup, is_ready, _manifest
+    if not python or not shutil.which(str(python)) or missing_base or upgrade_cuda:
         runtime = _manifest() if is_ready(cuda=device == "cuda") else setup(cpu=device != "cuda", progress=progress)
         python = override or runtime["python_executable"]
         base_model = runtime["base_model"]
