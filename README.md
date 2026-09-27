@@ -69,11 +69,12 @@ OmniVoice LoRA fine-tuning and inference use a separate environment because its 
 
 Completed runs store their LoRA checkpoint, base model, and isolated interpreter in `ready/artifacts.json`. UFT inference loads the adapter through OmniVoice's official LoRA API in that same environment. The language picker contains the IDs from OmniVoice's published catalog; catalog presence represents published coverage, not language-by-language UFT validation. Scratch training, resume from a local checkpoint, and E2A export are unsupported for this adapter.
 
-For CUDA training, use Linux with at least 16 GiB total and 12 GiB free GPU memory. CPU training requires Linux and at least 16 GiB available system RAM; it has not completed a UFT smoke test. The base Docker image does not include OmniVoice's optional environment. For example, install a PyTorch build compatible with your selected device in a separate environment, then:
+For CUDA training, use Linux with at least 16 GiB total and 12 GiB free GPU memory. CPU training requires Linux and at least 16 GiB available system RAM; it has not completed a UFT smoke test. The base Docker image does not include OmniVoice's optional environment. Create a separate uv environment, install PyTorch for your device into it, then install OmniVoice:
 
 ```bash
-/path/to/omni-env/bin/python -m pip install 'git+https://github.com/k2-fsa/OmniVoice.git@08be0b4ccbac3e13e374e86fbfead4b4cac343e2' 'peft>=0.20'
-export UFT_OMNIVOICE_PYTHON=/path/to/omni-env/bin/python
+uv venv --python 3.12 ../omnivoice-env
+uv pip install --python ../omnivoice-env/bin/python 'git+https://github.com/k2-fsa/OmniVoice.git@08be0b4ccbac3e13e374e86fbfead4b4cac343e2' 'peft>=0.20'
+export UFT_OMNIVOICE_PYTHON="$PWD/../omnivoice-env/bin/python"
 ```
 
 Cache `k2-fsa/OmniVoice`, `eustlb/higgs-audio-v2-tokenizer`, and `Qwen/Qwen3-0.6B` in the same Hugging Face cache used by UFT (`UFT_MODELS_DIR`) before training. Keep that cache available for inference; the packaged LoRA adapter needs its base model.
