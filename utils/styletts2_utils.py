@@ -173,6 +173,61 @@ def _validate_runtime(repo: Path, checkpoint: Path, python_executable: str) -> d
     return {"repo": repo.resolve(), "config": base_config, "checkpoint": checkpoint, "train_script": train_script}
 
 
+def _replace_upstream_literal(source: str, old: str, new: str, description: str) -> str:
+    count = source.count(old)
+    if count != 1:
+        raise ValueError(
+            f"The StyleTTS2 upstream CPU compatibility point changed in {description}; "
+            f"expected one {old!r}, found {count}. Review the upstream device code."
+        )
+    return source.replace(old, new)
+
+
+def _stage_cpu_compatibility(repo: Path, root: Path, script_source: str) -> tuple[Path, Path]:
+    """Stage narrow CPU fixes without changing the managed upstream checkout."""
+    root.mkdir(parents=True, exist_ok=True)
+    train_script = root / "train_finetune_cpu.py"
+    script_source = _replace_upstream_literal(
+        script_source,
+        "length_to_mask(mel_input_length // (2 ** n_down)).to('cuda')",
+        "length_to_mask(mel_input_length // (2 ** n_down)).to(device)",
+        "training validation device code",
+    )
+    train_script.write_text(script_source, encoding="utf-8")
+
+    source_modules = repo / "Modules"
+    staged_modules = root / "Modules"
+    if not source_modules.is_dir():
+        raise FileNotFoundError(f"StyleTTS2 Modules package not found: {source_modules}")
+    shutil.copytree(source_modules, staged_modules,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"), dirs_exist_ok=True)
+
+    replacements = {
+        "discriminators.py": (
+            ("self.window.to(y.get_device())", "self.window.to(y.device)"),
+        ),
+        "hifigan.py": (
+            ("torch.ones(1, 1, F0_down).to('cuda')", "torch.ones(1, 1, F0_down).to(F0_curve.device)"),
+            ("torch.ones(1, 1, N_down).to('cuda')", "torch.ones(1, 1, N_down).to(N.device)"),
+        ),
+        "istftnet.py": (
+            ("torch.ones(1, 1, F0_down).to('cuda')", "torch.ones(1, 1, F0_down).to(F0_curve.device)"),
+            ("torch.ones(1, 1, N_down).to('cuda')", "torch.ones(1, 1, N_down).to(N.device)"),
+        ),
+    }
+    for filename, pairs in replacements.items():
+        source_file = source_modules / filename
+        staged_file = staged_modules / filename
+        if not source_file.is_file() or not staged_file.is_file():
+            raise FileNotFoundError(f"StyleTTS2 CPU compatibility module not found: {source_file}")
+        source = source_file.read_text(encoding="utf-8")
+        staged = source
+        for old, new in pairs:
+            staged = _replace_upstream_literal(staged, old, new, str(source_file))
+        staged_file.write_text(staged, encoding="utf-8")
+    return train_script, staged_modules
+
+
 def train_styletts2(
     *,
     dataset_dir: str | os.PathLike[str],
@@ -294,15 +349,12 @@ def train_styletts2(
     staged_config.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     log_path = root / "training.log"
     train_script = paths["train_script"]
+    staged_modules: Path | None = None
     if device == "cpu":
-        # The upstream validation loop hardcodes one CUDA mask. Stage the
-        # official script with that device literal corrected in this run only.
-        train_script = root / "train_finetune_cpu.py"
+        # The upstream validation/discriminator/generator paths have several
+        # CUDA-only assumptions. Stage narrow run-local fixes; preserve source.
         script_source = paths["train_script"].read_text(encoding="utf-8")
-        old = "length_to_mask(mel_input_length // (2 ** n_down)).to('cuda')"
-        if script_source.count(old) != 1:
-            raise ValueError("The StyleTTS2 upstream CPU compatibility point changed; review its validation device code.")
-        train_script.write_text(script_source.replace(old, "length_to_mask(mel_input_length // (2 ** n_down)).to(device)"), encoding="utf-8")
+        train_script, staged_modules = _stage_cpu_compatibility(paths["repo"], root, script_source)
     command = [
         python_executable,
         "-m",
@@ -343,7 +395,24 @@ def train_styletts2(
         environment.setdefault("HF_HOME", str(managed_repo.parent / "huggingface"))
     if device == "cpu":
         environment["CUDA_VISIBLE_DEVICES"] = ""
-        environment["PYTHONPATH"] = str(paths["repo"]) + os.pathsep + environment.get("PYTHONPATH", "")
+        environment["PYTHONPATH"] = str(root) + os.pathsep + str(paths["repo"]) + os.pathsep + environment.get("PYTHONPATH", "")
+        assert staged_modules is not None
+        import_probe = subprocess.run(
+            [python_executable, "-c", "import Modules.discriminators; print(Modules.discriminators.__file__)"],
+            cwd=str(root),
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        imported_module = import_probe.stdout.strip().splitlines()[-1] if import_probe.stdout.strip() else ""
+        if import_probe.returncode or Path(imported_module).resolve() != (staged_modules / "discriminators.py").resolve():
+            detail = (import_probe.stderr or import_probe.stdout).strip()[-1500:]
+            raise RuntimeError(
+                "StyleTTS2 CPU run did not import its staged discriminator compatibility module. "
+                f"{detail}"
+            )
     environment.setdefault("TOKENIZERS_PARALLELISM", "false")
     if gpu_total_gib is not None and gpu_total_gib < 16:
         environment.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
