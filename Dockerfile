@@ -26,8 +26,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Copy the application files
 COPY . .
 
-# Ensure models directory exists
-RUN mkdir -p /app/models
+ARG UFT_UID=1000
+ARG UFT_GID=1000
+
+# Keep optional environments writable when switching between Docker and host.
+RUN mkdir -p /app/models /app/finetune_models /app/audio_data \
+    && groupadd --gid "$UFT_GID" uft \
+    && useradd --uid "$UFT_UID" --gid "$UFT_GID" --no-create-home uft \
+    && chown "$UFT_UID:$UFT_GID" /app/models /app/finetune_models /app/audio_data
+ENV HOME=/tmp
+USER uft
 
 # Expose the Gradio port
 EXPOSE 7862
