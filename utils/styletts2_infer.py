@@ -1,8 +1,4 @@
-"""Local-only StyleTTS2 inference adapter based on the official LibriTTS demo.
-
-The official runtime is loaded in its own interpreter from the caller-provided
-checkout. This keeps its dependencies isolated and never downloads assets.
-"""
+"""StyleTTS2 inference adapter based on the official LibriTTS demo."""
 from __future__ import annotations
 
 import json
@@ -51,7 +47,7 @@ model_params = recursive_munch(config['model_params'])
 model = build_model(model_params, text_aligner, pitch_extractor, plbert)
 for key in model:
     model[key].eval().to(device)
-checkpoint = torch.load(args['checkpoint'], map_location='cpu')
+checkpoint = torch.load(args['checkpoint'], map_location='cpu', weights_only=False)
 params = checkpoint.get('net', checkpoint)
 for key in model:
     if key not in params: continue
@@ -130,9 +126,9 @@ def synthesize_styletts2(*, artifacts: dict[str, Any], text: str, reference_wav:
         raise ValueError("Text is required for synthesis.")
     if not reference_wav:
         raise ValueError("StyleTTS2 inference requires a speaker reference WAV.")
-    repo_value = artifacts.get("styletts2_repo") or os.environ.get("UFT_STYLETTS2_REPO")
-    if not repo_value:
-        raise ValueError("Set UFT_STYLETTS2_REPO to the local official StyleTTS2 checkout.")
+    from setup_styletts2 import runtime_paths
+    default_repo, _, default_python = runtime_paths()
+    repo_value = artifacts.get("styletts2_repo") or os.environ.get("UFT_STYLETTS2_REPO") or default_repo
     repo = Path(repo_value).expanduser().resolve()
     checkpoint = _required(Path(artifacts["checkpoint"]).expanduser(), "trained checkpoint")
     config_path = _required(Path(artifacts["config"]).expanduser(), "fine-tuning config")
@@ -141,7 +137,7 @@ def synthesize_styletts2(*, artifacts: dict[str, Any], text: str, reference_wav:
         raise FileNotFoundError(f"Expected official StyleTTS2 source checkout at {repo}.")
     output = Path(output_file).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
-    python = python_executable or os.environ.get("UFT_STYLETTS2_PYTHON") or sys.executable
+    python = python_executable or os.environ.get("UFT_STYLETTS2_PYTHON") or artifacts.get("python_executable") or (str(default_python) if default_python.is_file() else sys.executable)
     requested_device = os.environ.get("UFT_STYLETTS2_INFER_DEVICE", "cpu").lower() if device == "auto" else device
     if requested_device not in {"cpu", "cuda"}:
         raise ValueError("UFT_STYLETTS2_INFER_DEVICE must be 'cpu' or 'cuda'.")

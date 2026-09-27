@@ -20,7 +20,8 @@ RUN if [ "$UFT_CPU_TORCH" = "1" ]; then \
       uv pip install --system --no-cache --index-url https://download.pytorch.org/whl/cpu \
         'torch==2.11.0+cpu' 'torchaudio==2.11.0+cpu' 'torchcodec==0.11.1+cpu'; \
     fi
-RUN uv pip install --system --no-cache -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system -r requirements.txt
 
 # Copy the application files
 COPY . .
