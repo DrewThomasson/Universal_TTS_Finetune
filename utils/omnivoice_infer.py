@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 
@@ -37,15 +37,32 @@ def synthesize_omnivoice(artifacts: dict, text: str, language: str, output_path:
     language = language.lower().replace("_", "-")
     if language not in OMNIVOICE_LANGUAGES:
         raise ValueError(f"OmniVoice does not publish support for language {language!r}.")
-    checkpoint = Path(artifacts.get("checkpoint", "")).expanduser()
-    if not checkpoint.is_dir():
+    checkpoint_value = artifacts.get("checkpoint")
+    checkpoint = Path(checkpoint_value).expanduser() if checkpoint_value else None
+    if (checkpoint is None or not checkpoint.is_dir()) and artifacts.get("artifacts_file"):
+        checkpoint = Path(artifacts["artifacts_file"]).parent / "model"
+    if checkpoint is None or not checkpoint.is_dir():
         raise FileNotFoundError(f"OmniVoice LoRA checkpoint directory not found: {checkpoint}")
-    python = artifacts.get("python_executable") or os.environ.get("UFT_OMNIVOICE_PYTHON") or sys.executable
+    override = os.environ.get("UFT_OMNIVOICE_PYTHON")
+    python = override or artifacts.get("python_executable")
+    if override and not shutil.which(override):
+        raise FileNotFoundError(f"OmniVoice Python override not found: {override}")
+    base_model = artifacts.get("base_model") or artifacts.get("pretrained_model_id", "k2-fsa/OmniVoice")
+    hf_home = artifacts.get("hf_home")
+    # A saved interpreter/cache can belong to another host or container.
+    # Recreate the managed runtime locally instead of executing stale paths.
+    missing_base = Path(base_model).is_absolute() and not Path(base_model).is_dir()
+    if not python or not shutil.which(str(python)) or missing_base:
+        from setup_omnivoice import setup, is_ready, _manifest
+        runtime = _manifest() if is_ready(cuda=device == "cuda") else setup(cpu=device != "cuda", progress=progress)
+        python = override or runtime["python_executable"]
+        base_model = runtime["base_model"]
+        hf_home = runtime["hf_home"]
     destination = Path(output_path).expanduser().resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
-    if artifacts.get("hf_home"):
-        env["HF_HOME"] = artifacts["hf_home"]
+    if hf_home:
+        env["HF_HOME"] = hf_home
     env["HF_HUB_OFFLINE"] = "1"
     env["TRANSFORMERS_OFFLINE"] = "1"
     env["HF_HUB_DISABLE_TELEMETRY"] = "1"
@@ -53,7 +70,7 @@ def synthesize_omnivoice(artifacts: dict, text: str, language: str, output_path:
         progress("Loading the cached OmniVoice base model and LoRA adapter in its isolated environment...")
     try:
         completed = subprocess.run(
-            [str(python), "-c", _INFER_SCRIPT, artifacts.get("base_model") or artifacts.get("pretrained_model_id", "k2-fsa/OmniVoice"),
+            [str(python), "-c", _INFER_SCRIPT, base_model,
              str(checkpoint), language, text, str(destination), device],
             capture_output=True, text=True, env=env, timeout=900,
         )
