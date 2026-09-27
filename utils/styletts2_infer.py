@@ -58,6 +58,15 @@ text_aligner = load_ASR_models(config['ASR_path'], config['ASR_config'])
 pitch_extractor = load_F0_models(config['F0_path'])
 plbert = load_plbert(config['PLBERT_dir'])
 model_params = recursive_munch(config['model_params'])
+wavlm_dir = args.get('wavlm_dir')
+configured_slm_model = str(model_params.slm.model)
+configured_slm_path = Path(configured_slm_model).expanduser()
+is_known_managed_wavlm = (configured_slm_path.is_absolute() and not configured_slm_path.exists()
+                          and configured_slm_path.name == 'wavlm-base-plus'
+                          and configured_slm_path.parent.name == 'styletts2')
+if wavlm_dir and (configured_slm_model == 'microsoft/wavlm-base-plus' or is_known_managed_wavlm or
+                  configured_slm_path == Path(wavlm_dir).expanduser()):
+    model_params.slm.model = wavlm_dir
 model = build_model(model_params, text_aligner, pitch_extractor, plbert)
 for key in model:
     model[key].eval().to(device)
@@ -192,6 +201,14 @@ def _pick_runtime(*, artifacts: dict[str, Any], explicit_repo: str | None,
             repo = Path(managed_repo).resolve()
         if not python:
             python = str(managed_python)
+    if repo.resolve() == Path(default_repo).resolve():
+        from setup_styletts2 import wavlm_path, wavlm_is_ready
+        wavlm = wavlm_path()
+        if not wavlm_is_ready():
+            managed_repo, _, managed_python = setup(cpu=cpu, progress=progress)
+            repo = Path(managed_repo).resolve()
+            if not python_override:
+                python = str(managed_python)
     if not _valid_repo(repo):
         raise FileNotFoundError(f"Expected official StyleTTS2 source checkout at {repo}.")
     if not _runnable_python(python):
@@ -215,6 +232,7 @@ def synthesize_styletts2(*, artifacts: dict[str, Any], text: str, reference_wav:
     reference = _required(Path(reference_wav).expanduser(), "speaker reference WAV")
     from setup_styletts2 import runtime_paths
     managed_repo, _, _ = runtime_paths()
+    from setup_styletts2 import wavlm_path
     repo, python = _pick_runtime(
         artifacts=artifacts, explicit_repo=None, explicit_python=python_executable,
         cpu=requested_device == "cpu", progress=progress,
@@ -223,7 +241,8 @@ def synthesize_styletts2(*, artifacts: dict[str, Any], text: str, reference_wav:
     output.parent.mkdir(parents=True, exist_ok=True)
     payload = {"repo": str(repo), "checkpoint": str(checkpoint), "config": str(config_path),
                "reference_wav": str(reference), "output_file": str(output), "text": text, "seed": 0,
-               "device": requested_device}
+               "device": requested_device,
+               "wavlm_dir": str(wavlm_path()) if repo.resolve() == managed_repo.resolve() else None}
     with tempfile.TemporaryDirectory(prefix="uft-styletts2-infer-", dir=output.parent) as temporary:
         payload_path = Path(temporary) / "request.json"
         worker_path = Path(temporary) / "worker.py"
@@ -234,8 +253,8 @@ def synthesize_styletts2(*, artifacts: dict[str, Any], text: str, reference_wav:
         try:
             environment = {**os.environ, "PYTHONPATH": str(repo) + os.pathsep + os.environ.get("PYTHONPATH", ""),
                            "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
-            if repo == managed_repo.resolve():
-                environment.setdefault("HF_HOME", str(managed_repo.parent / "huggingface"))
+            from utils.styletts2_env import configure_styletts2_hf_home
+            configure_styletts2_hf_home(environment, repo, managed_repo)
             result = subprocess.run([python, str(worker_path), str(payload_path)], cwd=repo,
                                     capture_output=True, text=True, timeout=900,
                                     env=environment)

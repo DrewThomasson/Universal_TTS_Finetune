@@ -334,6 +334,12 @@ def train_styletts2(
     config["ASR_config"] = str(paths["repo"] / "Utils/ASR/config.yml")
     config["ASR_path"] = str(paths["repo"] / "Utils/ASR/epoch_00080.pth")
     config["PLBERT_dir"] = str(paths["repo"] / "Utils/PLBERT")
+    from setup_styletts2 import runtime_paths, wavlm_path, wavlm_is_ready, WAVLM_REPO_ID, WAVLM_REVISION
+    managed_repo, _, _ = runtime_paths()
+    if Path(paths["repo"]).resolve() == managed_repo.resolve():
+        config.setdefault("model_params", {}).setdefault("slm", {})["model"] = str(wavlm_path())
+        if not wavlm_is_ready():
+            raise FileNotFoundError("Managed StyleTTS2 WavLM snapshot is missing; run setup_styletts2.py first.")
     config.setdefault("preprocess_params", {})["sr"] = STYLE_SAMPLE_RATE
     data_params = config.setdefault("data_params", {})
     ood_texts, ood_min_length = _make_ood_texts(train_rows, int(data_params.get("min_length", 50)))
@@ -382,6 +388,9 @@ def train_styletts2(
         "command": command,
         "gpu_total_gib": gpu_total_gib,
         "device": "cpu" if device == "cpu" else "cuda",
+        "wavlm_model_id": WAVLM_REPO_ID if Path(paths["repo"]).resolve() == managed_repo.resolve() else None,
+        "wavlm_revision": WAVLM_REVISION if Path(paths["repo"]).resolve() == managed_repo.resolve() else None,
+        "wavlm_path": str(wavlm_path()) if Path(paths["repo"]).resolve() == managed_repo.resolve() else None,
     }
     if dry_run:
         result["status"] = "dry-run"
@@ -391,8 +400,8 @@ def train_styletts2(
     environment = os.environ.copy()
     from setup_styletts2 import runtime_paths
     managed_repo, _, _ = runtime_paths()
-    if paths["repo"] == managed_repo.resolve():
-        environment.setdefault("HF_HOME", str(managed_repo.parent / "huggingface"))
+    from utils.styletts2_env import configure_styletts2_hf_home
+    configure_styletts2_hf_home(environment, paths["repo"], managed_repo)
     if device == "cpu":
         environment["CUDA_VISIBLE_DEVICES"] = ""
         environment["PYTHONPATH"] = str(root) + os.pathsep + str(paths["repo"]) + os.pathsep + environment.get("PYTHONPATH", "")
