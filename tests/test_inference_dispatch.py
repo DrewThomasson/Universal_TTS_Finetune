@@ -80,6 +80,25 @@ web_gui = importlib.import_module("web_gui")
 class InferenceDispatchTests(unittest.TestCase):
     """Exercise every built-in engine branch with fake artifacts and runtimes."""
 
+    def test_mms_download_returns_generator_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name in ("G_100000.pth", "config.json", "vocab.txt"):
+                (root / name).touch()
+            with patch.object(pipeline, "ModelManager") as manager:
+                manager.return_value.download_model.return_value = (str(root), None, None)
+                checkpoint = pipeline._download_restore_path("mms_vits", "ace", True, None, None, lambda *_: None)
+            self.assertEqual(checkpoint, str(root / "G_100000.pth"))
+
+    def test_mms_download_rejects_incomplete_model(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "G_100000.pth").touch()
+            with patch.object(pipeline, "ModelManager") as manager:
+                manager.return_value.download_model.return_value = (str(root), None, None)
+                with self.assertRaisesRegex(FileNotFoundError, "config.json"):
+                    pipeline._download_restore_path("mms_vits", "ace", True, None, None, lambda *_: None)
+
     def test_all_17_builtin_engines_route_to_the_expected_runtime(self):
         coqui_keys = (
             "align_tts", "delightful_tts", "fast_pitch", "fast_speech", "fastspeech2",
@@ -156,6 +175,21 @@ class InferenceDispatchTests(unittest.TestCase):
             adapter_call.assert_called_once()
             self.assertEqual(adapter_call.call_args.kwargs["reference_wav"], "reference.wav")
             self.assertEqual(result["model_key"], "styletts2")
+
+    def test_styletts2_rejects_unsupported_inference_language_before_runtime(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifacts = {"family": "styletts2", "model_key": "styletts2", "language": "en"}
+            adapter_call = Mock()
+            adapter = _module("utils.styletts2_infer", synthesize_styletts2=adapter_call)
+            with patch.object(pipeline, "load_artifacts", return_value=artifacts), \
+                 patch.dict(sys.modules, {"utils.styletts2_infer": adapter}):
+                with self.assertRaisesRegex(ValueError, "StyleTTS2 supports English only"):
+                    pipeline.synthesize(
+                        artifacts_path_or_dir=str(root), text="sample", speaker_wav="reference.wav",
+                        output_file=str(root / "out.wav"), language="es",
+                    )
+            adapter_call.assert_not_called()
 
     def test_omnivoice_routes_to_isolated_optional_inference(self):
         with tempfile.TemporaryDirectory() as temp_dir:

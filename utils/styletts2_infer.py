@@ -1,14 +1,9 @@
-"""Local-only StyleTTS2 inference adapter based on the official LibriTTS demo.
-
-The official runtime is loaded in its own interpreter from the caller-provided
-checkout. This keeps its dependencies isolated and never downloads assets.
-"""
+"""StyleTTS2 inference adapter based on the official LibriTTS demo."""
 from __future__ import annotations
 
 import json
 import os
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Callable
@@ -44,14 +39,38 @@ if args['device'] == 'cuda' and not torch.cuda.is_available():
 device = torch.device(args['device'])
 with open(args['config'], encoding='utf-8') as f:
     config = yaml.safe_load(f)
+for key, relative in {
+    'ASR_config': 'Utils/ASR/config.yml',
+    'ASR_path': 'Utils/ASR/epoch_00080.pth',
+    'F0_path': 'Utils/JDC/bst.t7',
+}.items():
+    if not Path(config.get(key, '')).is_file():
+        config[key] = str(repo / relative)
+plbert_dir = Path(config.get('PLBERT_dir', ''))
+if not plbert_dir.is_dir() or not list(plbert_dir.glob('step_*.t7')):
+    config['PLBERT_dir'] = str(repo / 'Utils/PLBERT')
+for key in ('ASR_config', 'ASR_path', 'F0_path'):
+    if not Path(config[key]).is_file():
+        raise FileNotFoundError('StyleTTS2 runtime asset not found: ' + config[key])
+if not list(Path(config['PLBERT_dir']).glob('step_*.t7')):
+    raise FileNotFoundError('StyleTTS2 PL-BERT checkpoint not found under ' + config['PLBERT_dir'])
 text_aligner = load_ASR_models(config['ASR_path'], config['ASR_config'])
 pitch_extractor = load_F0_models(config['F0_path'])
 plbert = load_plbert(config['PLBERT_dir'])
 model_params = recursive_munch(config['model_params'])
+wavlm_dir = args.get('wavlm_dir')
+configured_slm_model = str(model_params.slm.model)
+configured_slm_path = Path(configured_slm_model).expanduser()
+is_known_managed_wavlm = (configured_slm_path.is_absolute() and not configured_slm_path.exists()
+                          and configured_slm_path.name == 'wavlm-base-plus'
+                          and configured_slm_path.parent.name == 'styletts2')
+if wavlm_dir and (configured_slm_model == 'microsoft/wavlm-base-plus' or is_known_managed_wavlm or
+                  configured_slm_path == Path(wavlm_dir).expanduser()):
+    model_params.slm.model = wavlm_dir
 model = build_model(model_params, text_aligner, pitch_extractor, plbert)
 for key in model:
     model[key].eval().to(device)
-checkpoint = torch.load(args['checkpoint'], map_location='cpu')
+checkpoint = torch.load(args['checkpoint'], map_location='cpu', weights_only=False)
 params = checkpoint.get('net', checkpoint)
 for key in model:
     if key not in params: continue
@@ -122,6 +141,81 @@ def _required(path: Path, description: str) -> Path:
     return path.resolve()
 
 
+def _artifact_file(artifacts: dict[str, Any], key: str, filename: str, description: str) -> Path:
+    """Resolve a run file, falling back to its standard location by artifacts.json."""
+    value = artifacts.get(key)
+    if value:
+        saved = Path(value).expanduser()
+        if saved.is_file():
+            return saved.resolve()
+    artifact_file = artifacts.get("artifacts_file")
+    if artifact_file:
+        relocated = Path(artifact_file).expanduser().resolve().parent / filename
+        if relocated.is_file():
+            return relocated
+    raise FileNotFoundError(f"StyleTTS2 {description} not found: {value or filename}")
+
+
+def _valid_repo(repo: Path) -> bool:
+    return (repo / "models.py").is_file() and (repo / "Demo" / "Inference_LibriTTS.ipynb").is_file()
+
+
+def _runnable_python(python: str | os.PathLike[str]) -> bool:
+    try:
+        result = subprocess.run([str(python), "-c", "pass"], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _pick_runtime(*, artifacts: dict[str, Any], explicit_repo: str | None,
+                  explicit_python: str | None, cpu: bool,
+                  progress: ProgressCallback = None) -> tuple[Path, str]:
+    from setup_styletts2 import runtime_paths, is_ready, setup, wavlm_is_ready
+
+    saved_repo = artifacts.get("styletts2_repo")
+    saved_python = artifacts.get("python_executable")
+    default_repo, _, default_python = runtime_paths()
+    repo_override = explicit_repo or os.environ.get("UFT_STYLETTS2_REPO")
+    python_override = explicit_python or os.environ.get("UFT_STYLETTS2_PYTHON")
+
+    if repo_override:
+        repo = Path(repo_override).expanduser().resolve()
+        if not _valid_repo(repo):
+            raise FileNotFoundError(f"StyleTTS2 source override is unavailable: {repo}")
+    else:
+        repo = next((Path(candidate).expanduser().resolve() for candidate in (saved_repo, default_repo)
+                     if candidate and _valid_repo(Path(candidate).expanduser())), None)
+
+    if python_override:
+        if not _runnable_python(python_override):
+            raise RuntimeError(f"StyleTTS2 Python override cannot run: {python_override}")
+        python = str(Path(python_override).expanduser())
+    else:
+        python = next((str(Path(candidate).expanduser()) for candidate in (saved_python, default_python)
+                       if candidate and _runnable_python(candidate)), "")
+
+    if repo is None or not python:
+        managed_repo, _, managed_python = setup(cpu=cpu, progress=progress)
+        if repo is None:
+            repo = Path(managed_repo).resolve()
+        if not python:
+            python = str(managed_python)
+    if repo.resolve() == Path(default_repo).resolve():
+        require_cuda_runtime = not cpu and not bool(python_override)
+        runtime_ready = is_ready(cuda=require_cuda_runtime)
+        if not runtime_ready or not wavlm_is_ready():
+            managed_repo, _, managed_python = setup(cpu=cpu or bool(python_override), progress=progress)
+            repo = Path(managed_repo).resolve()
+            if not python_override:
+                python = str(managed_python)
+    if not _valid_repo(repo):
+        raise FileNotFoundError(f"Expected official StyleTTS2 source checkout at {repo}.")
+    if not _runnable_python(python):
+        raise RuntimeError(f"StyleTTS2 Python interpreter cannot run: {python}")
+    return repo, python
+
+
 def synthesize_styletts2(*, artifacts: dict[str, Any], text: str, reference_wav: str | os.PathLike[str] | None,
                          output_file: str | os.PathLike[str], python_executable: str | None = None,
                          progress: ProgressCallback = None, device: str = "auto") -> dict[str, Any]:
@@ -130,24 +224,25 @@ def synthesize_styletts2(*, artifacts: dict[str, Any], text: str, reference_wav:
         raise ValueError("Text is required for synthesis.")
     if not reference_wav:
         raise ValueError("StyleTTS2 inference requires a speaker reference WAV.")
-    repo_value = artifacts.get("styletts2_repo") or os.environ.get("UFT_STYLETTS2_REPO")
-    if not repo_value:
-        raise ValueError("Set UFT_STYLETTS2_REPO to the local official StyleTTS2 checkout.")
-    repo = Path(repo_value).expanduser().resolve()
-    checkpoint = _required(Path(artifacts["checkpoint"]).expanduser(), "trained checkpoint")
-    config_path = _required(Path(artifacts["config"]).expanduser(), "fine-tuning config")
-    reference = _required(Path(reference_wav).expanduser(), "speaker reference WAV")
-    if not (repo / "models.py").is_file() or not (repo / "Demo" / "Inference_LibriTTS.ipynb").is_file():
-        raise FileNotFoundError(f"Expected official StyleTTS2 source checkout at {repo}.")
-    output = Path(output_file).expanduser().resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
-    python = python_executable or os.environ.get("UFT_STYLETTS2_PYTHON") or sys.executable
     requested_device = os.environ.get("UFT_STYLETTS2_INFER_DEVICE", "cpu").lower() if device == "auto" else device
     if requested_device not in {"cpu", "cuda"}:
         raise ValueError("UFT_STYLETTS2_INFER_DEVICE must be 'cpu' or 'cuda'.")
+    checkpoint = _artifact_file(artifacts, "checkpoint", "model.pth", "trained checkpoint")
+    config_path = _artifact_file(artifacts, "config", "config_ft.yml", "fine-tuning config")
+    reference = _required(Path(reference_wav).expanduser(), "speaker reference WAV")
+    from setup_styletts2 import runtime_paths
+    managed_repo, _, _ = runtime_paths()
+    from setup_styletts2 import wavlm_path
+    repo, python = _pick_runtime(
+        artifacts=artifacts, explicit_repo=None, explicit_python=python_executable,
+        cpu=requested_device == "cpu", progress=progress,
+    )
+    output = Path(output_file).expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
     payload = {"repo": str(repo), "checkpoint": str(checkpoint), "config": str(config_path),
                "reference_wav": str(reference), "output_file": str(output), "text": text, "seed": 0,
-               "device": requested_device}
+               "device": requested_device,
+               "wavlm_dir": str(wavlm_path()) if repo.resolve() == managed_repo.resolve() else None}
     with tempfile.TemporaryDirectory(prefix="uft-styletts2-infer-", dir=output.parent) as temporary:
         payload_path = Path(temporary) / "request.json"
         worker_path = Path(temporary) / "worker.py"
@@ -156,10 +251,13 @@ def synthesize_styletts2(*, artifacts: dict[str, Any], text: str, reference_wav:
         if progress:
             progress(f"Running official StyleTTS2 LibriTTS inference on {requested_device}...")
         try:
+            environment = {**os.environ, "PYTHONPATH": str(repo) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+                           "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
+            from utils.styletts2_env import configure_styletts2_hf_home
+            configure_styletts2_hf_home(environment, repo, managed_repo)
             result = subprocess.run([python, str(worker_path), str(payload_path)], cwd=repo,
                                     capture_output=True, text=True, timeout=900,
-                                    env={**os.environ, "PYTHONPATH": str(repo) + os.pathsep + os.environ.get("PYTHONPATH", ""),
-                                         "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"})
+                                    env=environment)
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError("StyleTTS2 inference exceeded the 15 minute limit and was stopped.") from exc
         if result.returncode:

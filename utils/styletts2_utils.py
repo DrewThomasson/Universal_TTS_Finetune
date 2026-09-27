@@ -2,8 +2,8 @@
 
 This module deliberately does not import StyleTTS2 into Universal TTS's process.
 It stages the existing UFT dataset into StyleTTS2's 24 kHz list format, checks
-the upstream checkout and local assets, and starts its official script in an
-isolated subprocess. It never downloads checkpoints or dependencies.
+the prepared upstream checkout and local assets, and starts its official script
+in an isolated subprocess. First-use setup is handled by the UFT pipeline.
 """
 from __future__ import annotations
 
@@ -173,6 +173,61 @@ def _validate_runtime(repo: Path, checkpoint: Path, python_executable: str) -> d
     return {"repo": repo.resolve(), "config": base_config, "checkpoint": checkpoint, "train_script": train_script}
 
 
+def _replace_upstream_literal(source: str, old: str, new: str, description: str) -> str:
+    count = source.count(old)
+    if count != 1:
+        raise ValueError(
+            f"The StyleTTS2 upstream CPU compatibility point changed in {description}; "
+            f"expected one {old!r}, found {count}. Review the upstream device code."
+        )
+    return source.replace(old, new)
+
+
+def _stage_cpu_compatibility(repo: Path, root: Path, script_source: str) -> tuple[Path, Path]:
+    """Stage narrow CPU fixes without changing the managed upstream checkout."""
+    root.mkdir(parents=True, exist_ok=True)
+    train_script = root / "train_finetune_cpu.py"
+    script_source = _replace_upstream_literal(
+        script_source,
+        "length_to_mask(mel_input_length // (2 ** n_down)).to('cuda')",
+        "length_to_mask(mel_input_length // (2 ** n_down)).to(device)",
+        "training validation device code",
+    )
+    train_script.write_text(script_source, encoding="utf-8")
+
+    source_modules = repo / "Modules"
+    staged_modules = root / "Modules"
+    if not source_modules.is_dir():
+        raise FileNotFoundError(f"StyleTTS2 Modules package not found: {source_modules}")
+    shutil.copytree(source_modules, staged_modules,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"), dirs_exist_ok=True)
+
+    replacements = {
+        "discriminators.py": (
+            ("self.window.to(y.get_device())", "self.window.to(y.device)"),
+        ),
+        "hifigan.py": (
+            ("torch.ones(1, 1, F0_down).to('cuda')", "torch.ones(1, 1, F0_down).to(F0_curve.device)"),
+            ("torch.ones(1, 1, N_down).to('cuda')", "torch.ones(1, 1, N_down).to(N.device)"),
+        ),
+        "istftnet.py": (
+            ("torch.ones(1, 1, F0_down).to('cuda')", "torch.ones(1, 1, F0_down).to(F0_curve.device)"),
+            ("torch.ones(1, 1, N_down).to('cuda')", "torch.ones(1, 1, N_down).to(N.device)"),
+        ),
+    }
+    for filename, pairs in replacements.items():
+        source_file = source_modules / filename
+        staged_file = staged_modules / filename
+        if not source_file.is_file() or not staged_file.is_file():
+            raise FileNotFoundError(f"StyleTTS2 CPU compatibility module not found: {source_file}")
+        source = source_file.read_text(encoding="utf-8")
+        staged = source
+        for old, new in pairs:
+            staged = _replace_upstream_literal(staged, old, new, str(source_file))
+        staged_file.write_text(staged, encoding="utf-8")
+    return train_script, staged_modules
+
+
 def train_styletts2(
     *,
     dataset_dir: str | os.PathLike[str],
@@ -200,11 +255,13 @@ def train_styletts2(
         raise ValueError("StyleTTS2 needs at least one epoch and batch size 2 or greater; upstream fails at batch size 1.")
     dataset = Path(dataset_dir).expanduser().resolve()
     root = Path(training_root).expanduser().resolve()
-    paths = _validate_runtime(Path(styletts2_repo).expanduser().resolve(), Path(pretrained_checkpoint).expanduser().resolve(), python_executable)
     train_rows = _read_uft_rows(dataset, "train")
     val_rows = _read_uft_rows(dataset, "val")
     if len(train_rows) < batch_size:
         raise ValueError(f"StyleTTS2 needs at least {batch_size} training clips for batch size {batch_size}.")
+    if len(val_rows) < batch_size:
+        raise ValueError(f"StyleTTS2 needs at least {batch_size} validation clips for batch size {batch_size}; upstream drops incomplete validation batches.")
+    paths = _validate_runtime(Path(styletts2_repo).expanduser().resolve(), Path(pretrained_checkpoint).expanduser().resolve(), python_executable)
 
     gpu_total_gib = None
     if not dry_run and device != "cpu":
@@ -277,6 +334,12 @@ def train_styletts2(
     config["ASR_config"] = str(paths["repo"] / "Utils/ASR/config.yml")
     config["ASR_path"] = str(paths["repo"] / "Utils/ASR/epoch_00080.pth")
     config["PLBERT_dir"] = str(paths["repo"] / "Utils/PLBERT")
+    from setup_styletts2 import runtime_paths, wavlm_path, wavlm_is_ready, WAVLM_REPO_ID, WAVLM_REVISION
+    managed_repo, _, _ = runtime_paths()
+    if Path(paths["repo"]).resolve() == managed_repo.resolve():
+        config.setdefault("model_params", {}).setdefault("slm", {})["model"] = str(wavlm_path())
+        if not wavlm_is_ready():
+            raise FileNotFoundError("Managed StyleTTS2 WavLM snapshot is missing; run setup_styletts2.py first.")
     config.setdefault("preprocess_params", {})["sr"] = STYLE_SAMPLE_RATE
     data_params = config.setdefault("data_params", {})
     ood_texts, ood_min_length = _make_ood_texts(train_rows, int(data_params.get("min_length", 50)))
@@ -292,15 +355,12 @@ def train_styletts2(
     staged_config.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     log_path = root / "training.log"
     train_script = paths["train_script"]
+    staged_modules: Path | None = None
     if device == "cpu":
-        # The upstream validation loop hardcodes one CUDA mask. Stage the
-        # official script with that device literal corrected in this run only.
-        train_script = root / "train_finetune_cpu.py"
+        # The upstream validation/discriminator/generator paths have several
+        # CUDA-only assumptions. Stage narrow run-local fixes; preserve source.
         script_source = paths["train_script"].read_text(encoding="utf-8")
-        old = "length_to_mask(mel_input_length // (2 ** n_down)).to('cuda')"
-        if script_source.count(old) != 1:
-            raise ValueError("The StyleTTS2 upstream CPU compatibility point changed; review its validation device code.")
-        train_script.write_text(script_source.replace(old, "length_to_mask(mel_input_length // (2 ** n_down)).to(device)"), encoding="utf-8")
+        train_script, staged_modules = _stage_cpu_compatibility(paths["repo"], root, script_source)
     command = [
         python_executable,
         "-m",
@@ -319,6 +379,7 @@ def train_styletts2(
         "training_root": str(root),
         "dataset_dir": str(dataset),
         "styletts2_repo": str(paths["repo"]),
+        "python_executable": python_executable,
         "base_checkpoint": str(paths["checkpoint"]),
         "config": str(staged_config),
         "train_manifest": str(train_list),
@@ -327,6 +388,9 @@ def train_styletts2(
         "command": command,
         "gpu_total_gib": gpu_total_gib,
         "device": "cpu" if device == "cpu" else "cuda",
+        "wavlm_model_id": WAVLM_REPO_ID if Path(paths["repo"]).resolve() == managed_repo.resolve() else None,
+        "wavlm_revision": WAVLM_REVISION if Path(paths["repo"]).resolve() == managed_repo.resolve() else None,
+        "wavlm_path": str(wavlm_path()) if Path(paths["repo"]).resolve() == managed_repo.resolve() else None,
     }
     if dry_run:
         result["status"] = "dry-run"
@@ -334,9 +398,30 @@ def train_styletts2(
 
     _notify(progress, "Starting official StyleTTS2 fine-tuning...")
     environment = os.environ.copy()
+    from setup_styletts2 import runtime_paths
+    managed_repo, _, _ = runtime_paths()
+    from utils.styletts2_env import configure_styletts2_hf_home
+    configure_styletts2_hf_home(environment, paths["repo"], managed_repo)
     if device == "cpu":
         environment["CUDA_VISIBLE_DEVICES"] = ""
-        environment["PYTHONPATH"] = str(paths["repo"]) + os.pathsep + environment.get("PYTHONPATH", "")
+        environment["PYTHONPATH"] = str(root) + os.pathsep + str(paths["repo"]) + os.pathsep + environment.get("PYTHONPATH", "")
+        assert staged_modules is not None
+        import_probe = subprocess.run(
+            [python_executable, "-c", "import Modules.discriminators; print(Modules.discriminators.__file__)"],
+            cwd=str(root),
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        imported_module = import_probe.stdout.strip().splitlines()[-1] if import_probe.stdout.strip() else ""
+        if import_probe.returncode or Path(imported_module).resolve() != (staged_modules / "discriminators.py").resolve():
+            detail = (import_probe.stderr or import_probe.stdout).strip()[-1500:]
+            raise RuntimeError(
+                "StyleTTS2 CPU run did not import its staged discriminator compatibility module. "
+                f"{detail}"
+            )
     environment.setdefault("TOKENIZERS_PARALLELISM", "false")
     if gpu_total_gib is not None and gpu_total_gib < 16:
         environment.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -433,7 +518,7 @@ def train_styletts2(
         "status": "complete",
         "trained_steps": trained_steps,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "inference_note": "UFT inference uses the official LibriTTS model flow; requires local StyleTTS2 source/assets and a speaker reference WAV.",
+        "inference_note": "UFT inference uses the prepared StyleTTS2 runtime and a speaker reference WAV.",
     }
     artifacts_file = ready / "artifacts.json"
     artifacts_file.write_text(json.dumps(artifacts, indent=2), encoding="utf-8")

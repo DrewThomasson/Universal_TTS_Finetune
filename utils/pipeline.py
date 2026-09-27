@@ -1209,6 +1209,14 @@ def _download_restore_path(spec_key: str, language: str, use_pretrained: bool, r
     model_id = pretrained_model_id or choices[0]
     _notify(progress, f"Downloading base checkpoint {model_id} for {spec.label}...")
     model_path, _, _ = ModelManager(progress_bar=True).download_model(model_id)
+    if spec.family == "mms":
+        checkpoint = Path(model_path)
+        if checkpoint.is_dir():
+            checkpoint /= "G_100000.pth"
+        for required in (checkpoint, checkpoint.parent / "config.json", checkpoint.parent / "vocab.txt"):
+            if not required.is_file():
+                raise FileNotFoundError(f"MMS checkpoint is missing {required}")
+        return str(checkpoint)
     return model_path
 
 
@@ -1809,13 +1817,34 @@ def train_model(
             if dry_run:
                 return {"model_key": model_key, "family": spec.family, "training_root": str(training_root), "train_manifest": str(train_manifest), "eval_manifest": str(eval_manifest), "planned_steps": steps, "status": "dry-run"}
             from utils.omnivoice_utils import run_omnivoice_finetune
+            from setup_omnivoice import is_ready as omnivoice_ready, setup as setup_omnivoice, _manifest as omnivoice_manifest
+            custom_python = overrides.get("omnivoice_python") or os.environ.get("UFT_OMNIVOICE_PYTHON")
+            managed = not custom_python
+            runtime = {}
+            if managed:
+                if sys.platform != "linux":
+                    raise RuntimeError("OmniVoice training currently requires Linux; no optional runtime was downloaded.")
+                if selected_device == "cuda":
+                    if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).total_memory < 16 * 1024 ** 3:
+                        raise RuntimeError("OmniVoice CUDA training needs a GPU with at least 16 GiB VRAM. Select CPU if this machine has at least 16 GiB available RAM.")
+                    if torch.cuda.mem_get_info(0)[0] < 12 * 1024 ** 3:
+                        raise RuntimeError("OmniVoice CUDA training needs at least 12 GiB free VRAM before setup.")
+                elif selected_device == "cpu":
+                    from utils.device import available_memory_gib
+                    if available_memory_gib() is None or available_memory_gib() < 16:
+                        raise RuntimeError("OmniVoice CPU training needs at least 16 GiB available RAM before setup.")
+                if not omnivoice_ready(cuda=selected_device == "cuda"):
+                    runtime = setup_omnivoice(cpu=selected_device == "cpu", progress=progress)
+                else:
+                    runtime = omnivoice_manifest()
             checkpoint_dir = run_omnivoice_finetune(
                 train_manifest, training_root, dev_jsonl=eval_manifest,
-                base_model=spec.official_model_id,
-                audio_tokenizer=overrides.get("omnivoice_audio_tokenizer") or "eustlb/higgs-audio-v2-tokenizer",
+                base_model=runtime.get("base_model", spec.official_model_id),
+                audio_tokenizer=overrides.get("omnivoice_audio_tokenizer") or runtime.get("audio_tokenizer") or "eustlb/higgs-audio-v2-tokenizer",
                 steps=steps, save_steps=steps, batch_tokens=512,
                 progress_callback=progress,
-                python_executable=overrides.get("omnivoice_python") or os.environ.get("UFT_OMNIVOICE_PYTHON") or sys.executable,
+                python_executable=custom_python or runtime.get("python_executable") or sys.executable,
+                hf_home=runtime.get("hf_home"),
                 device=selected_device,
             )
             checkpoints = sorted(checkpoint_dir.glob("checkpoint-*"), key=lambda path: path.stat().st_mtime)
@@ -1829,19 +1858,25 @@ def train_model(
             shutil.copytree(checkpoints[-1], packaged_checkpoint)
             adapter_artifacts_path = training_root / "artifacts.json"
             adapter_metadata = json.loads(adapter_artifacts_path.read_text(encoding="utf-8")) if adapter_artifacts_path.is_file() else {}
-            artifacts = {"model_key": model_key, "model_label": spec.label, "family": spec.family, "training_root": str(training_root), "dataset_dir": str(dataset_root), "checkpoint": str(packaged_checkpoint), "training_checkpoint": str(checkpoints[-1]), "checkpoint_dir": str(checkpoint_dir), "config": adapter_metadata.get("train_config", str(training_root / "omnivoice_work" / "config" / "train.json")), "adapter_artifacts_file": str(adapter_artifacts_path) if adapter_artifacts_path.is_file() else "", "pretrained_model_id": spec.official_model_id, "base_model": adapter_metadata.get("base_model", spec.official_model_id), "trained_steps": steps, "language": language, "device": selected_device, "python_executable": adapter_metadata.get("python_executable", overrides.get("omnivoice_python") or os.environ.get("UFT_OMNIVOICE_PYTHON") or sys.executable), "inference_note": "Inference uses the official OmniVoice LoRA loader in the isolated OmniVoice environment. E2A export is unavailable."}
+            artifacts = {"model_key": model_key, "model_label": spec.label, "family": spec.family, "training_root": str(training_root), "dataset_dir": str(dataset_root), "checkpoint": str(packaged_checkpoint), "training_checkpoint": str(checkpoints[-1]), "checkpoint_dir": str(checkpoint_dir), "config": adapter_metadata.get("train_config", str(training_root / "omnivoice_work" / "config" / "train.json")), "adapter_artifacts_file": str(adapter_artifacts_path) if adapter_artifacts_path.is_file() else "", "pretrained_model_id": spec.official_model_id, "base_model": adapter_metadata.get("base_model", spec.official_model_id), "trained_steps": steps, "language": language, "device": selected_device, "python_executable": adapter_metadata.get("python_executable", runtime.get("python_executable") or custom_python or sys.executable), "hf_home": runtime.get("hf_home") or adapter_metadata.get("hf_home", ""), "inference_note": "Inference uses the official OmniVoice LoRA loader in the isolated OmniVoice environment. E2A export is unavailable."}
             (ready_dir / "artifacts.json").write_text(json.dumps(artifacts, indent=2), encoding="utf-8")
             artifacts["artifacts_file"] = str(ready_dir / "artifacts.json")
             return artifacts
         from utils.styletts2_utils import train_styletts2
-        repo = overrides.get("styletts2_repo") or os.environ.get("UFT_STYLETTS2_REPO")
-        checkpoint = restore_path or os.environ.get("UFT_STYLETTS2_CHECKPOINT")
-        if not repo or not checkpoint:
-            raise ValueError(
-                "StyleTTS2 needs the official source checkout and LibriTTS base checkpoint. "
-                "Set UFT_STYLETTS2_REPO and UFT_STYLETTS2_CHECKPOINT, or set styletts2_repo "
-                "in config overrides and use the local restore checkpoint field."
-            )
+        from setup_styletts2 import is_ready, runtime_paths, setup
+        default_repo, default_checkpoint, default_python = runtime_paths()
+        custom_repo = overrides.get("styletts2_repo") or os.environ.get("UFT_STYLETTS2_REPO")
+        custom_checkpoint = restore_path or os.environ.get("UFT_STYLETTS2_CHECKPOINT")
+        custom_python = overrides.get("styletts2_python") or os.environ.get("UFT_STYLETTS2_PYTHON")
+        if not custom_repo and not dry_run and not is_ready(cuda=selected_device == "cuda"):
+            if selected_device == "cuda" and (not torch.cuda.is_available() or torch.cuda.mem_get_info(0)[0] < 9 * 1024 ** 3):
+                raise RuntimeError("StyleTTS2 needs at least 9 GiB free VRAM before first-use setup. Select CPU or free GPU memory.")
+            setup(cpu=selected_device == "cpu", progress=progress)
+        repo = custom_repo or default_repo
+        checkpoint = custom_checkpoint or default_checkpoint
+        python = custom_python or (str(default_python) if not custom_repo and default_python.is_file() else sys.executable)
+        if not Path(repo).is_dir() or not Path(checkpoint).is_file():
+            raise ValueError("StyleTTS2 runtime is unavailable. Run `python setup_styletts2.py` to retry its download.")
         return train_styletts2(
             dataset_dir=dataset_root,
             training_root=training_root,
@@ -1850,7 +1885,7 @@ def train_model(
             language=language,
             epochs=epochs,
             batch_size=batch_size,
-            python_executable=overrides.get("styletts2_python") or os.environ.get("UFT_STYLETTS2_PYTHON") or sys.executable,
+            python_executable=python,
             stream_logs=stream_logs,
             progress=progress,
             dry_run=dry_run,
@@ -2254,6 +2289,9 @@ def synthesize(
         from utils.f5tts_utils import synthesize_f5tts
         output_path = synthesize_f5tts(artifacts, text, language, speaker_reference, output_path, progress, device=selected_device)
     elif artifacts.get("family") == "styletts2":
+        language = language or artifacts.get("language", "en")
+        if not pretrained_model_choices("styletts2", language):
+            raise ValueError(f"StyleTTS2 supports English only; no checkpoint is available for language {language}.")
         from utils.styletts2_infer import synthesize_styletts2
         return synthesize_styletts2(
             artifacts=artifacts,
