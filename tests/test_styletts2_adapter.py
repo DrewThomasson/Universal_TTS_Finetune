@@ -84,6 +84,7 @@ class StyleTTS2AdapterTests(unittest.TestCase):
             model_dir.mkdir()
             with (patch("setup_styletts2.runtime_paths", return_value=(managed_repo, root / "model.pth", Path(sys.executable))),
                   patch("setup_styletts2.wavlm_path", return_value=model_dir),
+                  patch("setup_styletts2.is_ready", return_value=True),
                   patch("setup_styletts2.setup", return_value=(managed_repo, root / "model.pth", root / "managed-python")) as setup):
                 repo, python = _pick_runtime(
                     artifacts={}, explicit_repo=None, explicit_python=sys.executable, cpu=True,
@@ -91,6 +92,39 @@ class StyleTTS2AdapterTests(unittest.TestCase):
             self.assertEqual(repo, managed_repo.resolve())
             self.assertEqual(python, sys.executable)
             setup.assert_called_once_with(cpu=True, progress=None)
+
+    def test_cuda_request_rebuilds_managed_cpu_runtime_when_no_python_override(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            managed_repo = self._repo(root / "managed-source")
+            with (patch("setup_styletts2.runtime_paths", return_value=(managed_repo, root / "model.pth", Path(sys.executable))),
+                  patch("setup_styletts2.is_ready", side_effect=lambda *, cuda=False: not cuda),
+                  patch("setup_styletts2.wavlm_is_ready", return_value=True),
+                  patch("setup_styletts2.setup", return_value=(managed_repo, root / "model.pth", Path(sys.executable))) as setup):
+                repo, python = _pick_runtime(
+                    artifacts={"styletts2_repo": str(managed_repo), "python_executable": sys.executable},
+                    explicit_repo=None, explicit_python=None, cpu=False,
+                )
+            self.assertEqual(repo, managed_repo.resolve())
+            self.assertEqual(python, sys.executable)
+            setup.assert_called_once_with(cpu=False, progress=None)
+
+    def test_explicit_cuda_python_override_skips_managed_backend_upgrade(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            managed_repo = self._repo(root / "managed-source")
+            with (patch("setup_styletts2.runtime_paths", return_value=(managed_repo, root / "model.pth", Path(sys.executable))),
+                  patch("setup_styletts2.is_ready", return_value=True) as ready,
+                  patch("setup_styletts2.wavlm_is_ready", return_value=True),
+                  patch("setup_styletts2.setup") as setup):
+                repo, python = _pick_runtime(
+                    artifacts={"styletts2_repo": str(managed_repo)},
+                    explicit_repo=None, explicit_python=sys.executable, cpu=False,
+                )
+            self.assertEqual(repo, managed_repo.resolve())
+            self.assertEqual(python, sys.executable)
+            ready.assert_called_once_with(cuda=False)
+            setup.assert_not_called()
 
     def test_missing_run_files_resolve_next_to_artifacts_file(self):
         with tempfile.TemporaryDirectory() as folder:

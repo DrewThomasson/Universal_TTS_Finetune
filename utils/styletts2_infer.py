@@ -171,7 +171,7 @@ def _runnable_python(python: str | os.PathLike[str]) -> bool:
 def _pick_runtime(*, artifacts: dict[str, Any], explicit_repo: str | None,
                   explicit_python: str | None, cpu: bool,
                   progress: ProgressCallback = None) -> tuple[Path, str]:
-    from setup_styletts2 import runtime_paths, setup
+    from setup_styletts2 import runtime_paths, is_ready, setup, wavlm_is_ready
 
     saved_repo = artifacts.get("styletts2_repo")
     saved_python = artifacts.get("python_executable")
@@ -202,10 +202,10 @@ def _pick_runtime(*, artifacts: dict[str, Any], explicit_repo: str | None,
         if not python:
             python = str(managed_python)
     if repo.resolve() == Path(default_repo).resolve():
-        from setup_styletts2 import wavlm_path, wavlm_is_ready
-        wavlm = wavlm_path()
-        if not wavlm_is_ready():
-            managed_repo, _, managed_python = setup(cpu=cpu, progress=progress)
+        require_cuda_runtime = not cpu and not bool(python_override)
+        runtime_ready = is_ready(cuda=require_cuda_runtime)
+        if not runtime_ready or not wavlm_is_ready():
+            managed_repo, _, managed_python = setup(cpu=cpu or bool(python_override), progress=progress)
             repo = Path(managed_repo).resolve()
             if not python_override:
                 python = str(managed_python)
