@@ -1209,6 +1209,14 @@ def _download_restore_path(spec_key: str, language: str, use_pretrained: bool, r
     model_id = pretrained_model_id or choices[0]
     _notify(progress, f"Downloading base checkpoint {model_id} for {spec.label}...")
     model_path, _, _ = ModelManager(progress_bar=True).download_model(model_id)
+    if spec.family == "mms":
+        checkpoint = Path(model_path)
+        if checkpoint.is_dir():
+            checkpoint /= "G_100000.pth"
+        for required in (checkpoint, checkpoint.parent / "config.json", checkpoint.parent / "vocab.txt"):
+            if not required.is_file():
+                raise FileNotFoundError(f"MMS checkpoint is missing {required}")
+        return str(checkpoint)
     return model_path
 
 

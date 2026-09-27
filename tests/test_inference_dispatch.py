@@ -80,6 +80,25 @@ web_gui = importlib.import_module("web_gui")
 class InferenceDispatchTests(unittest.TestCase):
     """Exercise every built-in engine branch with fake artifacts and runtimes."""
 
+    def test_mms_download_returns_generator_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name in ("G_100000.pth", "config.json", "vocab.txt"):
+                (root / name).touch()
+            with patch.object(pipeline, "ModelManager") as manager:
+                manager.return_value.download_model.return_value = (str(root), None, None)
+                checkpoint = pipeline._download_restore_path("mms_vits", "ace", True, None, None, lambda *_: None)
+            self.assertEqual(checkpoint, str(root / "G_100000.pth"))
+
+    def test_mms_download_rejects_incomplete_model(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "G_100000.pth").touch()
+            with patch.object(pipeline, "ModelManager") as manager:
+                manager.return_value.download_model.return_value = (str(root), None, None)
+                with self.assertRaisesRegex(FileNotFoundError, "config.json"):
+                    pipeline._download_restore_path("mms_vits", "ace", True, None, None, lambda *_: None)
+
     def test_all_17_builtin_engines_route_to_the_expected_runtime(self):
         coqui_keys = (
             "align_tts", "delightful_tts", "fast_pitch", "fast_speech", "fastspeech2",
