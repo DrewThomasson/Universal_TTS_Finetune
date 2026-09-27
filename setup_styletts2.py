@@ -19,6 +19,8 @@ SOURCE_REVISION = "5cedc71c333f8d8b8551ca59378bdcc7af4c9529"
 MODEL_REVISION = "33161ec703934b0e6e226c631d42c2a3eed3ee6a"
 MODEL_SHA256 = "1164ffe19a17449d2c722234cecaf2836b35a698fb8ffd42562d2663657dca0a"
 MONOTONIC_REVISION = "c6e5e6cb19882164027eb6e35118e841eed9298e"
+WAVLM_REPO_ID = "microsoft/wavlm-base-plus"
+WAVLM_REVISION = "4c66d4806a428f2e922ccfa1a962776e232d487b"
 MODEL_RELATIVE = Path("Models/LibriTTS/epochs_2nd_00020.pth")
 AUXILIARY_FILES = {
     "Utils/ASR/epoch_00080.pth": 90_000_000,
@@ -32,6 +34,45 @@ def runtime_paths() -> tuple[Path, Path, Path]:
     home = get_models_dir() / "styletts2"
     python = home / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     return home / "source", home / MODEL_RELATIVE, python
+
+
+def wavlm_path(home: Path | None = None) -> Path:
+    return (home or (get_models_dir() / "styletts2")) / "wavlm-base-plus"
+
+
+def wavlm_is_ready(home: Path | None = None) -> bool:
+    destination = wavlm_path(home)
+    weights = destination / "pytorch_model.bin"
+    try:
+        return (weights.is_file() and weights.stat().st_size >= 300_000_000
+                and (destination / "config.json").is_file()
+                and (destination / ".uft_revision").read_text(encoding="utf-8").strip() == WAVLM_REVISION)
+    except OSError:
+        return False
+
+
+def _ensure_wavlm(python: Path, home: Path, progress: Progress = None) -> Path:
+    destination = wavlm_path(home)
+    config = destination / "config.json"
+    weights = destination / "pytorch_model.bin"
+    if wavlm_is_ready(home):
+        return destination
+    if destination.exists():
+        shutil.rmtree(destination)
+    _notify(progress, f"Downloading {WAVLM_REPO_ID} ({WAVLM_REVISION[:12]}) for offline StyleTTS2 training and inference...")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    script = (
+        "from huggingface_hub import snapshot_download; import sys; "
+        "snapshot_download(repo_id=sys.argv[1], revision=sys.argv[2], local_dir=sys.argv[3], "
+        "allow_patterns=['config.json', 'pytorch_model.bin'])"
+    )
+    environment = os.environ.copy()
+    environment["HF_HOME"] = str(home / "huggingface")
+    _run([str(python), "-c", script, WAVLM_REPO_ID, WAVLM_REVISION, str(destination)], environment=environment)
+    if not config.is_file() or not weights.is_file() or weights.stat().st_size < 300_000_000:
+        raise RuntimeError(f"Hugging Face snapshot for {WAVLM_REPO_ID} is incomplete at {destination}")
+    (destination / ".uft_revision").write_text(WAVLM_REVISION + "\n", encoding="utf-8")
+    return destination
 
 
 def _run(command: list[str], *, environment: dict[str, str] | None = None) -> None:
@@ -83,6 +124,7 @@ def is_ready(*, cuda: bool = False) -> bool:
         and checkpoint.is_file() and checkpoint.stat().st_size >= 700_000_000
         and python.is_file()
         and (not cuda or _torch_backend(source.parent) == "cuda")
+        and wavlm_is_ready()
         and all((source / relative).is_file() and (source / relative).stat().st_size >= size
                 for relative, size in AUXILIARY_FILES.items())
     )
@@ -182,6 +224,7 @@ def _setup_unlocked(*, cpu: bool = False, progress: Progress = None) -> tuple[Pa
         finally:
             if temporary_env.exists():
                 shutil.rmtree(temporary_env)
+    _ensure_wavlm(python, home, progress)
     _notify(progress, f"StyleTTS2 ready. Source: {source}\nCheckpoint: {checkpoint}\nPython: {python}")
     return source, checkpoint, python
 
