@@ -721,10 +721,9 @@ def update_training_options(model_key, language, use_pretrained, pretrained_mode
         if language != "en":
             return "❌ StyleTTS2 currently supports English fine-tuning only.", gr.update(value=True, interactive=False)
         return (
-            "🟡 **StyleTTS2** uses the official LibriTTS base checkpoint. Set `UFT_STYLETTS2_REPO` "
-            "to an official StyleTTS2 checkout and `UFT_STYLETTS2_CHECKPOINT` to a local base checkpoint "
-            "before training. Its optional dependencies must be installed separately. Batch size 2 and gradient "
-            "accumulation 1 are required; inference uses the local official LibriTTS runtime, and E2A export is unavailable.",
+            "**StyleTTS2:** First training use downloads the official runtime and weights "
+            "(about 1 GB plus Python packages) into `models/styletts2/`. Later runs reuse them. Use English and batch size 2; "
+            "inference needs a speaker reference WAV. E2A export is unavailable.",
             gr.update(value=True, interactive=False),
         )
 
@@ -732,10 +731,11 @@ def update_training_options(model_key, language, use_pretrained, pretrained_mode
         if not choices:
             return f"❌ OmniVoice does not publish support for `{language}`.", gr.update(value=True, interactive=False)
         return (
-            f"🟡 **OmniVoice** uses `{official_model_id}` for the published language ID `{language}`. "
-            "Set `UFT_OMNIVOICE_PYTHON` to the optional OmniVoice environment. The base model, audio tokenizer, "
-            "and Qwen3-0.6B must already be cached there; UFT will not download them. Batch size and gradient "
-            "accumulation are fixed at 1. Inference uses the official LoRA API in that environment. E2A export is unavailable.",
+            f"**OmniVoice** uses `{official_model_id}` for `{language}`. First training use installs an isolated uv runtime "
+            "and downloads about 5 GB of model files; later runs reuse them. Its weights are "
+            "[noncommercial](https://huggingface.co/k2-fsa/OmniVoice) and the audio tokenizer has a "
+            "[separate license](https://huggingface.co/k2-fsa/OmniVoice/blob/main/audio_tokenizer/LICENSE). "
+            "Batch size and gradient accumulation are fixed at 1. E2A export is unavailable.",
             gr.update(value=True, interactive=False),
         )
 
@@ -1342,7 +1342,7 @@ if __name__ == "__main__":
         train_device.change(fn=training_resource_guidance, inputs=[model_key, train_device], outputs=[training_resources])
         model_key.change(
             fn=lambda model: gr.update(
-                label="Local StyleTTS2 base checkpoint" if model == "styletts2" else "Restore path unavailable" if model in {"omnivoice", "f5_tts"} else "Optional checkpoint to continue from",
+                label="Optional custom StyleTTS2 base checkpoint" if model == "styletts2" else "Restore path unavailable" if model in {"omnivoice", "f5_tts"} else "Optional checkpoint to continue from",
                 value="",
                 interactive=model not in {"omnivoice", "f5_tts"},
             ),

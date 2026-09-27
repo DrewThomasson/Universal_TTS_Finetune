@@ -44,6 +44,8 @@ def synthesize_omnivoice(artifacts: dict, text: str, language: str, output_path:
     destination = Path(output_path).expanduser().resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
+    if artifacts.get("hf_home"):
+        env["HF_HOME"] = artifacts["hf_home"]
     env["HF_HUB_OFFLINE"] = "1"
     env["TRANSFORMERS_OFFLINE"] = "1"
     env["HF_HUB_DISABLE_TELEMETRY"] = "1"

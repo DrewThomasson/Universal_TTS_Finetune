@@ -2,8 +2,8 @@
 
 This module deliberately does not import StyleTTS2 into Universal TTS's process.
 It stages the existing UFT dataset into StyleTTS2's 24 kHz list format, checks
-the upstream checkout and local assets, and starts its official script in an
-isolated subprocess. It never downloads checkpoints or dependencies.
+the prepared upstream checkout and local assets, and starts its official script
+in an isolated subprocess. First-use setup is handled by the UFT pipeline.
 """
 from __future__ import annotations
 
@@ -319,6 +319,7 @@ def train_styletts2(
         "training_root": str(root),
         "dataset_dir": str(dataset),
         "styletts2_repo": str(paths["repo"]),
+        "python_executable": python_executable,
         "base_checkpoint": str(paths["checkpoint"]),
         "config": str(staged_config),
         "train_manifest": str(train_list),
@@ -334,6 +335,10 @@ def train_styletts2(
 
     _notify(progress, "Starting official StyleTTS2 fine-tuning...")
     environment = os.environ.copy()
+    from setup_styletts2 import runtime_paths
+    managed_repo, _, _ = runtime_paths()
+    if paths["repo"] == managed_repo.resolve():
+        environment.setdefault("HF_HOME", str(managed_repo.parent / "huggingface"))
     if device == "cpu":
         environment["CUDA_VISIBLE_DEVICES"] = ""
         environment["PYTHONPATH"] = str(paths["repo"]) + os.pathsep + environment.get("PYTHONPATH", "")
@@ -433,7 +438,7 @@ def train_styletts2(
         "status": "complete",
         "trained_steps": trained_steps,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "inference_note": "UFT inference uses the official LibriTTS model flow; requires local StyleTTS2 source/assets and a speaker reference WAV.",
+        "inference_note": "UFT inference uses the prepared StyleTTS2 runtime and a speaker reference WAV.",
     }
     artifacts_file = ready / "artifacts.json"
     artifacts_file.write_text(json.dumps(artifacts, indent=2), encoding="utf-8")
