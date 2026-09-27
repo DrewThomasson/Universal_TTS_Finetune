@@ -232,15 +232,16 @@ def run_omnivoice_finetune(
     max_dataset_audio_gib: float = 50.0,
     python_executable: str | Path | None = None,
     progress_callback: Callable[[str], None] | None = None,
+    device: str = "auto",
 ) -> Path:
-    """Prepare data and run a single-GPU OmniVoice SDPA + LoRA fine-tune.
+    """Prepare data and run an OmniVoice SDPA + LoRA fine-tune.
 
     ``train_jsonl`` and optional ``dev_jsonl`` use upstream JSONL rows with
     ``id``, ``audio_path``, and ``text`` fields (``language_id`` is optional).
     Checkpoints are capped to the last two, and model downloads are disabled.
     Returns the output directory containing the training run. The conservative
-    default requires a 16 GiB GPU with at least 12 GiB currently free; it will
-    reject a 12 GiB device before tokenization or training starts.
+    CUDA training requires a 16 GiB GPU with at least 12 GiB currently free.
+    CPU training requires Linux and 16 GiB available RAM.
     """
     if steps < 1 or save_steps < 1:
         raise ValueError("steps and save_steps must be positive integers")
@@ -275,7 +276,16 @@ def run_omnivoice_finetune(
         "the documented official OmniVoice source revision; its PyPI 0.2.1 wheel lacks LoRA support",
         python,
     )
-    _cuda_preflight(min_free_vram_gib, min_total_vram_gib, python)
+    if device == "cpu":
+        # Upstream extraction falls back to CPU when no CUDA devices are visible.
+        if sys.platform != "linux":
+            raise ValueError("OmniVoice CPU fine-tuning is currently supported on Linux only.")
+        from utils.device import available_memory_gib
+        available_ram = available_memory_gib()
+        if available_ram is None or available_ram < 16:
+            raise RuntimeError("OmniVoice CPU training needs at least 16 GiB available system RAM.")
+    else:
+        _cuda_preflight(min_free_vram_gib, min_total_vram_gib, python)
 
     # Force local-only resolution before any work directory or subprocess is created.
     base_path = Path(base_model).expanduser()
@@ -312,6 +322,8 @@ def run_omnivoice_finetune(
 
     # Pin offline mode so transitive HF loaders cannot unexpectedly fetch weights.
     env = os.environ.copy()
+    if device == "cpu":
+        env["CUDA_VISIBLE_DEVICES"] = ""
     env.update({
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
@@ -363,8 +375,8 @@ def run_omnivoice_finetune(
         "batch_tokens": batch_tokens,
         "gradient_accumulation_steps": 1,
         "num_workers": 1,
-        "mixed_precision": "bf16",
-        "allow_tf32": True,
+        "mixed_precision": "no" if device == "cpu" else "bf16",
+        "allow_tf32": device != "cpu",
         "logging_steps": 10,
         "eval_steps": save_steps,
         "save_steps": save_steps,
@@ -422,6 +434,7 @@ def run_omnivoice_finetune(
     _run([
         python, "-m", "accelerate.commands.launch",
         "--num_processes", "1",
+        *(["--cpu"] if device == "cpu" else []),
         "-m", "omnivoice.cli.train",
         "--train_config", str(train_config_path),
         "--data_config", str(data_config_path),
@@ -435,6 +448,7 @@ def run_omnivoice_finetune(
         "checkpoint": str(out / "checkpoints" / f"checkpoint-{steps}"),
         "checkpoint_dir": str(out / "checkpoints"),
         "train_config": str(train_config_path),
+        "device": device,
     }, indent=2), encoding="utf-8")
     if progress_callback:
         progress_callback(f"OmniVoice fine-tuning complete: {out / 'checkpoints'}")

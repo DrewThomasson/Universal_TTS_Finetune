@@ -52,6 +52,7 @@ from utils.model_registry import MMS_LANGUAGES, OMNIVOICE_LANGUAGES, XTTS_LANGUA
 from utils.asr import MMS_ASR_LANGUAGES
 from utils.e2a_export import export_e2a_zip
 from utils.language_support import coqui_phoneme_language
+from utils.resource_guidance import training_resource_guidance
 
 LANGUAGE_CHOICES = [
     "en",
@@ -532,7 +533,7 @@ def preprocess_re_diarize(dataset_dir, expected_speakers, diarize_threshold, out
         )
 
 
-def run_training(model_key, dataset_dir, language, num_epochs, batch_size, grad_accum, out_path, max_audio_length, restore_path, use_pretrained, pretrained_model_id, extra_overrides_json, sample_epoch_interval=0, sample_text="", progress=gr.Progress()):
+def run_training(model_key, dataset_dir, language, num_epochs, batch_size, grad_accum, out_path, max_audio_length, restore_path, use_pretrained, pretrained_model_id, extra_overrides_json, sample_epoch_interval=0, sample_text="", device="auto", progress=gr.Progress()):
     try:
         tracker = TrainingProgressTracker(progress, int(num_epochs))
         result = train_model(
@@ -543,6 +544,7 @@ def run_training(model_key, dataset_dir, language, num_epochs, batch_size, grad_
             epochs=int(num_epochs),
             batch_size=int(batch_size),
             grad_accum=int(grad_accum),
+            device=device,
             max_audio_seconds=int(max_audio_length),
             restore_path=restore_path or None,
             use_pretrained=use_pretrained,
@@ -611,7 +613,7 @@ def inspect_artifacts(artifacts_path, model_key):
         return format_exception(exc), "", "", "", "", None, None
 
 
-def run_inference(artifacts_path, model_key, language, tts_text, speaker_audio_file, out_path, progress=gr.Progress()):
+def run_inference(artifacts_path, model_key, language, tts_text, speaker_audio_file, out_path, device="auto", progress=gr.Progress()):
     try:
         result = synthesize(
             artifacts_path_or_dir=artifacts_path,
@@ -620,6 +622,7 @@ def run_inference(artifacts_path, model_key, language, tts_text, speaker_audio_f
             language=language,
             speaker_wav=speaker_audio_file or None,
             output_file=default_test_output(out_path),
+            device=device,
             progress=_gradio_progress(progress),
         )
         return "Speech generated.", _clean_audio_path(result["output_file"]), _clean_audio_path(result.get("speaker_wav"))
@@ -819,7 +822,7 @@ def preprocess_and_train(
     expected_speakers, diarize_threshold,
     generate_synthetic, synthetic_audio_file, synthetic_vtt_file,
     model_key, train_language, num_epochs, batch_size, grad_accum, max_audio_length, restore_path, use_pretrained, pretrained_model_id, extra_overrides_json,
-    sample_epoch_interval, sample_text,
+    sample_epoch_interval, sample_text, device,
     tts_text,
     auto_split_sentences=True,
     progress=gr.Progress()
@@ -844,7 +847,7 @@ def preprocess_and_train(
         
         train_res = run_training(
             model_key, dataset_dir, train_language, num_epochs, batch_size, grad_accum, out_path, max_audio_length, restore_path, use_pretrained, pretrained_model_id, extra_overrides_json,
-            sample_epoch_interval, sample_text,
+            sample_epoch_interval, sample_text, device,
             progress
         )
         artifacts_file_val = train_res[2]
@@ -858,7 +861,7 @@ def preprocess_and_train(
         progress(0.9, desc="Training complete! Starting step 3: Generating test speech...")
         
         infer_res = run_inference(
-            artifacts_file_val, model_key, train_language, tts_text, speaker_ref_val, out_path, progress
+            artifacts_file_val, model_key, train_language, tts_text, speaker_ref_val, out_path, device, progress
         )
         return train_res + preprocess_res + infer_res
     except Exception as exc:
@@ -905,7 +908,7 @@ if __name__ == "__main__":
     }
     """
 
-    with gr.Blocks(title='Universal TTS Finetune') as demo:
+    with gr.Blocks(title='Universal TTS Finetune', theme=theme, css=css_str) as demo:
         gr.Markdown(
             "# Universal TTS Finetune\n"
             "Prepare an LJSpeech-style dataset, fine-tune a supported Coqui recipe, and test the trained model."
@@ -1024,6 +1027,8 @@ if __name__ == "__main__":
             num_epochs = gr.Slider(label="Epochs", minimum=1, maximum=1000, step=1, value=args.num_epochs)
             batch_size = gr.Slider(label="Batch size", minimum=1, maximum=128, step=1, value=args.batch_size)
             grad_accum = gr.Slider(label="Grad accumulation", minimum=1, maximum=128, step=1, value=args.grad_acumm)
+            train_device = gr.Dropdown(label="Training device", choices=["auto", "cpu", "cuda"], value="auto", info="CPU training is slower; CUDA uses a compatible NVIDIA GPU.")
+            training_resources = gr.Markdown(training_resource_guidance("xtts_v2", "auto"))
             max_audio_length = gr.Slider(label="Max audio length (seconds)", minimum=2, maximum=30, step=1, value=args.max_audio_length)
             extra_overrides_json = gr.Code(
                 label="Optional config overrides JSON",
@@ -1071,6 +1076,7 @@ if __name__ == "__main__":
                 sources=["upload"],
             )
             infer_language = gr.Dropdown(label="Inference language", choices=XTTS_LANGUAGE_CHOICES["xtts_v2"], value="en")
+            infer_device = gr.Dropdown(label="Inference device", choices=["auto", "cpu", "cuda"], value="auto")
             tts_text = gr.Textbox(label="Input text", value="This fine-tuned model is ready to test.")
             infer_status = gr.Textbox(label="Status", interactive=False)
             generated_audio = gr.Audio(label="Generated audio")
@@ -1178,6 +1184,7 @@ if __name__ == "__main__":
                 extra_overrides_json,
                 sample_epoch_interval,
                 sample_text,
+                train_device,
                 # Inference input
                 tts_text,
                 auto_split_sentences,
@@ -1244,6 +1251,7 @@ if __name__ == "__main__":
                 extra_overrides_json,
                 sample_epoch_interval,
                 sample_text,
+                train_device,
             ],
             outputs=[
                 train_status,
@@ -1300,6 +1308,7 @@ if __name__ == "__main__":
                 tts_text,
                 speaker_reference_audio,
                 out_path,
+                infer_device,
             ],
             outputs=[infer_status, generated_audio, used_reference_audio],
         )
@@ -1329,6 +1338,8 @@ if __name__ == "__main__":
             inputs=[model_key, train_dataset_dir],
             outputs=[num_epochs, batch_size],
         )
+        model_key.change(fn=training_resource_guidance, inputs=[model_key, train_device], outputs=[training_resources])
+        train_device.change(fn=training_resource_guidance, inputs=[model_key, train_device], outputs=[training_resources])
         model_key.change(
             fn=lambda model: gr.update(
                 label="Local StyleTTS2 base checkpoint" if model == "styletts2" else "Restore path unavailable" if model in {"omnivoice", "f5_tts"} else "Optional checkpoint to continue from",
@@ -1459,4 +1470,4 @@ if __name__ == "__main__":
         str(Path.cwd().resolve()),
         str(Path.cwd().parent.parent.resolve())
     ]
-    demo.launch(share=args.share, debug=False, server_name=args.host, server_port=args.port, allowed_paths=allowed, theme=theme, css=css_str)
+    demo.launch(share=args.share, debug=False, server_name=args.host, server_port=args.port, allowed_paths=allowed)

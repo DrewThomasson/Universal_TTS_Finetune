@@ -338,6 +338,7 @@ def train_piper_model(
     sample_text: str = "",
     config_path: Path | None = None,
     output_dir: Path | None = None,
+    device: str = "auto",
 ) -> str:
     """Invokes pytorch-lightning training via piper_train as a subprocess."""
     piper_python_src = Path(__file__).resolve().parent.parent / "piper"
@@ -346,7 +347,13 @@ def train_piper_model(
     
     # Configure accelerator based on availability (Mac GPUs use mps, otherwise cpu/gpu)
     devices = 1
-    if torch.cuda.is_available():
+    if device == "cpu":
+        accelerator = "cpu"
+    elif device == "cuda":
+        if not torch.cuda.is_available():
+            raise ValueError("CUDA was selected but is unavailable for Piper.")
+        accelerator = "gpu"
+    elif torch.cuda.is_available():
         accelerator = "gpu"
     elif torch.backends.mps.is_available():
         accelerator = "mps"

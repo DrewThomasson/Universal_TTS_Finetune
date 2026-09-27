@@ -30,6 +30,7 @@ except ImportError:
 
 import argparse
 import json
+import sys
 
 from utils.pipeline import (
     default_test_output,
@@ -44,6 +45,7 @@ from utils.pipeline import (
 )
 from utils.model_registry import pretrained_model_choices
 from utils.e2a_export import export_e2a_zip
+from utils.resource_guidance import training_resource_guidance
 
 
 def _print_json(payload: dict) -> None:
@@ -98,6 +100,7 @@ def _build_parser() -> argparse.ArgumentParser:
     train.add_argument("--language", default="en")
     train.add_argument("--epochs", type=int, default=10)
     train.add_argument("--batch-size", type=int, default=None, help="Training batch size (default: 1 for OmniVoice/F5-TTS, 2 for StyleTTS2, 8 for other models)")
+    train.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto", help="Training device (CPU can be very slow).")
     train.add_argument("--grad-accum", type=int, default=1)
     train.add_argument("--max-audio-seconds", type=int, default=11)
     train.add_argument("--restore-path")
@@ -116,6 +119,7 @@ def _build_parser() -> argparse.ArgumentParser:
     infer.add_argument("--language", default="en")
     infer.add_argument("--speaker-wav")
     infer.add_argument("--output-file")
+    infer.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto", help="Inference device.")
 
     workflow = subparsers.add_parser("workflow", help="Prepare dataset, train, and optionally synthesize in one command.")
     workflow.add_argument("--model", required=True, choices=[key for key, _ in dropdown_choices()])
@@ -128,6 +132,7 @@ def _build_parser() -> argparse.ArgumentParser:
     workflow.add_argument("--asr-backend", choices=["auto", "whisper", "mms"], default="auto")
     workflow.add_argument("--epochs", type=int, default=10)
     workflow.add_argument("--batch-size", type=int, default=None, help="Training batch size (default: 1 for OmniVoice/F5-TTS, 2 for StyleTTS2, 8 for other models)")
+    workflow.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto", help="Training device (CPU can be very slow).")
     workflow.add_argument("--grad-accum", type=int, default=1)
     workflow.add_argument("--max-audio-seconds", type=int, default=11)
     workflow.add_argument("--restore-path")
@@ -156,6 +161,7 @@ def _build_parser() -> argparse.ArgumentParser:
     batch_test.add_argument("--asr-backend", choices=["auto", "whisper", "mms"], default="auto")
     batch_test.add_argument("--epochs", type=int, default=1)
     batch_test.add_argument("--batch-size", type=int, default=8)
+    batch_test.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto", help="Training and inference device.")
     batch_test.add_argument("--grad-accum", type=int, default=1)
     batch_test.add_argument("--max-audio-seconds", type=int, default=11)
     batch_test.add_argument("--test-text", default="This is a quick validation sample from the batch test.")
@@ -221,6 +227,7 @@ def main() -> None:
         return
 
     if args.command == "train":
+        print(training_resource_guidance(args.model, args.device), file=sys.stderr)
         result = train_model(
             model_key=args.model,
             output_root=args.output_root,
@@ -229,6 +236,7 @@ def main() -> None:
             epochs=args.epochs,
             batch_size=args.batch_size if args.batch_size is not None else (1 if args.model in {"omnivoice", "f5_tts"} else 2 if args.model == "styletts2" else 8),
             grad_accum=args.grad_accum,
+            device=args.device,
             max_audio_seconds=args.max_audio_seconds,
             restore_path=args.restore_path,
             use_pretrained=not args.no_pretrained,
@@ -252,11 +260,13 @@ def main() -> None:
             language=args.language,
             speaker_wav=args.speaker_wav,
             output_file=output_file,
+            device=args.device,
         )
         _print_json(result)
         return
 
     if args.command == "workflow":
+        print(training_resource_guidance(args.model, args.device), file=sys.stderr)
         dataset = prepare_dataset(
             output_root=args.output_root,
             audio_dir=args.audio_dir,
@@ -278,6 +288,7 @@ def main() -> None:
             epochs=args.epochs,
             batch_size=args.batch_size if args.batch_size is not None else (1 if args.model in {"omnivoice", "f5_tts"} else 2 if args.model == "styletts2" else 8),
             grad_accum=args.grad_accum,
+            device=args.device,
             max_audio_seconds=args.max_audio_seconds,
             restore_path=args.restore_path,
             use_pretrained=not args.no_pretrained,
@@ -296,6 +307,7 @@ def main() -> None:
                 language=args.language,
                 speaker_wav=args.speaker_wav,
                 output_file=args.output_file or default_test_output(args.output_root),
+                device=args.device,
             )
         _print_json(payload)
         return
@@ -326,6 +338,7 @@ def main() -> None:
         sample_count = dataset.get("created_sample_count", 0)
         
         for model_key, model_label in dropdown_choices():
+            print(training_resource_guidance(model_key, args.device), file=sys.stderr)
             print(f"\n==================================================")
             print(f"Batch testing: {model_label} ({model_key})")
             print(f"==================================================\n")
@@ -345,6 +358,7 @@ def main() -> None:
                     epochs=current_epochs,
                     batch_size=args.batch_size,
                     grad_accum=args.grad_accum,
+                    device=args.device,
                     max_audio_seconds=args.max_audio_seconds,
                     restore_path=None,
                     use_pretrained=True,
@@ -361,6 +375,7 @@ def main() -> None:
                     language=args.language,
                     speaker_wav=None,
                     output_file=str(output_wav),
+                    device=args.device,
                 )
                 
                 results["models"][model_key] = {
