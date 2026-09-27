@@ -85,6 +85,13 @@ def _setup_unlocked(*, cpu: bool = False, progress: Progress = None) -> dict:
     current = _manifest()
     backend_file = home / ".torch_backend"
     backend = backend_file.read_text(encoding="utf-8").strip() if backend_file.is_file() else current.get("torch_backend", "")
+    if python.is_file() and backend not in {"cpu", "cuda"}:
+        probe = subprocess.run(
+            [str(python), "-c", "import torch; print('cuda' if torch.version.cuda else 'cpu')"],
+            capture_output=True, text=True, check=True,
+        )
+        backend = probe.stdout.strip().splitlines()[-1]
+        backend_file.write_text(backend, encoding="utf-8")
     needs_environment = not python.is_file() or (not cpu and backend != "cuda")
     if needs_environment:
         _notify(progress, "Installing isolated OmniVoice uv environment (several GB)...")
