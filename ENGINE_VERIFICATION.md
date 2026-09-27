@@ -44,6 +44,7 @@ Updated 2026-09-26. **Pass** means the linked report establishes that check. **â
 
 ## Coverage and limitations
 
+- The CPU device picker and CLI flag have routing tests, and resource guidance covers all 20 registered engines. Align TTS completed four CPU optimizer steps and produced a packaged checkpoint in a bounded 16 GiB / 4 CPU container, using seven short training clips and one evaluation clip. Piper completed a CPU x-low epoch with 8/8 batches and saved a checkpoint; ONNX export was not rerun. The new CPU Compose image built with PyTorch 2.11.0+cpu, imported TorchCodec, and served the GUI over HTTP. The other 18 engines still need their own CPU optimizer-step verification. Optional F5-TTS, StyleTTS2 and OmniVoice CPU routes have interface/adapter checks only. The PR report records commands and retries.
 - The original 16 engines have historical training/packaging passes across several E2A component commits. Their shared GUI/Docker checks do not establish actual GUI inference for each engine.
 - MMS's exported model reloaded and generated audio; Docker runtime was blocked on the tested host.
 - StyleTTS2 and OmniVoice passed GUI HTTP startup and real inference callbacks. A complete browser walkthrough is not recorded. Their optional runtimes are not bundled into or runtime-tested in the base Docker image.

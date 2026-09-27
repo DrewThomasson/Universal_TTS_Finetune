@@ -124,7 +124,7 @@ def _required(path: Path, description: str) -> Path:
 
 def synthesize_styletts2(*, artifacts: dict[str, Any], text: str, reference_wav: str | os.PathLike[str] | None,
                          output_file: str | os.PathLike[str], python_executable: str | None = None,
-                         progress: ProgressCallback = None) -> dict[str, Any]:
+                         progress: ProgressCallback = None, device: str = "auto") -> dict[str, Any]:
     """Synthesize with a completed UFT StyleTTS2 run and explicit reference WAV."""
     if not text.strip():
         raise ValueError("Text is required for synthesis.")
@@ -142,7 +142,7 @@ def synthesize_styletts2(*, artifacts: dict[str, Any], text: str, reference_wav:
     output = Path(output_file).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     python = python_executable or os.environ.get("UFT_STYLETTS2_PYTHON") or sys.executable
-    requested_device = os.environ.get("UFT_STYLETTS2_INFER_DEVICE", "cpu").lower()
+    requested_device = os.environ.get("UFT_STYLETTS2_INFER_DEVICE", "cpu").lower() if device == "auto" else device
     if requested_device not in {"cpu", "cuda"}:
         raise ValueError("UFT_STYLETTS2_INFER_DEVICE must be 'cpu' or 'cuda'.")
     payload = {"repo": str(repo), "checkpoint": str(checkpoint), "config": str(config_path),

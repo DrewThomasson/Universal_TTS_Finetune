@@ -24,6 +24,8 @@ def _run(mode, config, root, progress=None):
     env.update(WANDB_MODE='disabled', HF_HUB_DISABLE_TELEMETRY='1', PYTHONUNBUFFERED='1')
     log_path = root / ('f5_train.log' if mode == 'train' else request.stem + '.log')
     command = [str(python), str(Path(__file__).with_name('f5tts_worker.py')), mode, str(request)]
+    if config.get("device") == "cpu":
+        env["CUDA_VISIBLE_DEVICES"] = ""
     if progress:
         progress(f'Running official F5-TTS {mode}; log: {log_path}')
     if mode == 'train':
@@ -63,12 +65,12 @@ def _run(mode, config, root, progress=None):
 
 
 def train_f5tts(*, dataset_dir, training_root, language, epochs, batch_size, grad_accum,
-                max_audio_seconds, restore_path=None, python_executable=None, dry_run=False, progress=None):
+                max_audio_seconds, restore_path=None, python_executable=None, dry_run=False, progress=None, device="auto"):
     if epochs < 1 or batch_size < 1 or grad_accum < 1 or not 0.3 <= max_audio_seconds <= 30:
         raise ValueError('F5-TTS requires positive epochs/batch/accumulation and an audio limit between 0.3 and 30 seconds.')
     config = dict(dataset_dir=str(dataset_dir), training_root=str(training_root), language=language,
                   epochs=epochs, batch_size=batch_size, grad_accum=grad_accum, max_audio_seconds=max_audio_seconds,
-                  restore_path=restore_path, python_executable=python_executable or os.environ.get('UFT_F5TTS_PYTHON'))
+                  restore_path=restore_path, python_executable=python_executable or os.environ.get('UFT_F5TTS_PYTHON'), device=device)
     if restore_path:
         raise ValueError('F5-TTS local checkpoint overrides and resume are not supported; use the official base.')
     if dry_run:
@@ -80,13 +82,13 @@ def train_f5tts(*, dataset_dir, training_root, language, epochs, batch_size, gra
     return artifacts
 
 
-def synthesize_f5tts(artifacts, text, language, reference_wav, output_file, progress=None):
+def synthesize_f5tts(artifacts, text, language, reference_wav, output_file, progress=None, device="auto"):
     from utils.model_registry import pretrained_model_choices
     if not pretrained_model_choices('f5_tts', language):
         raise ValueError(f'F5-TTS v1 does not support language {language}. Select en or zh-cn.')
     if reference_wav and Path(reference_wav).resolve() != Path(artifacts['reference_wav']).resolve():
         raise ValueError('F5-TTS uses the packaged reference audio and exact transcript; a different speaker WAV is unsupported.')
-    config = dict(artifacts, text=text, output_file=str(output_file))
+    config = dict(artifacts, text=text, output_file=str(output_file), device=device)
     _run('infer', config, Path(output_file).parent, progress)
     if not Path(output_file).is_file() or Path(output_file).stat().st_size <= 44:
         raise RuntimeError('F5-TTS inference produced no audio.')

@@ -50,11 +50,14 @@ def train(config):
     updates = math.ceil(math.ceil(len(rows) / config['batch_size']) / config['grad_accum']) * config['epochs']
     if updates < 2:
         raise ValueError('F5-TTS needs at least two optimizer updates for its warmup/decay schedule.')
-    if not torch.cuda.is_available():
-        raise ValueError('This F5-TTS training profile requires CUDA.')
-    free, _ = torch.cuda.mem_get_info()
-    if free < 9 * 1024**3:
-        raise ValueError('F5-TTS training needs at least 9 GiB free GPU memory for this profile; close other GPU tasks or use a larger GPU.')
+    device = config.get('device', 'auto')
+    use_cuda = device == 'cuda' or (device == 'auto' and torch.cuda.is_available())
+    if use_cuda and not torch.cuda.is_available():
+        raise ValueError('CUDA was selected but unavailable in the F5-TTS runtime.')
+    if use_cuda:
+        free, _ = torch.cuda.mem_get_info()
+        if free < 9 * 1024**3:
+            raise ValueError('F5-TTS training needs at least 9 GiB free GPU memory for this profile.')
     if shutil.disk_usage(root).free < 12 * 1024**3:
         raise ValueError('F5-TTS training needs at least 12 GiB free disk space for base and training checkpoints.')
     checkpoint_dir = root / 'checkpoints'
@@ -67,7 +70,7 @@ def train(config):
                       save_per_updates=updates, keep_last_n_checkpoints=0, last_per_updates=updates,
                       checkpoint_path=str(checkpoint_dir), batch_size_per_gpu=config['batch_size'], batch_size_type='sample',
                       grad_accumulation_steps=config['grad_accum'], logger=None, log_samples=False,
-                      bnb_optimizer=True, accelerate_kwargs={'mixed_precision': 'fp16'})
+                      bnb_optimizer=use_cuda, accelerate_kwargs={'mixed_precision': 'fp16' if use_cuda else 'no'})
     trainer.train(CustomDataset(rows), num_workers=1, resumable_with_seed=666)
     checkpoint = torch.load(checkpoint_dir / 'model_last.pt', map_location='cpu', weights_only=True)
     completed = int(checkpoint['update'])
@@ -96,7 +99,7 @@ def infer(config):
         raise ValueError(f'F5-TTS base vocabulary cannot encode {unknown!r}.')
     import soundfile as sf
     from f5_tts.api import F5TTS
-    model = F5TTS(model='F5TTS_v1_Base', ckpt_file=config['checkpoint'], vocab_file=config['vocab'], use_ema=False)
+    model = F5TTS(model='F5TTS_v1_Base', ckpt_file=config['checkpoint'], vocab_file=config['vocab'], use_ema=False, device='cpu' if config.get('device') == 'cpu' else None)
     audio, rate, _ = model.infer(ref_file=config['reference_wav'], ref_text=config['reference_text'], gen_text=config['text'], seed=666)
     sf.write(config['output_file'], audio, rate)
 

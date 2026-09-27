@@ -124,11 +124,12 @@ class InferenceDispatchTests(unittest.TestCase):
                             text="Mocked dispatch sample.",
                             output_file=str(root / f"{key}.wav"),
                             language="en",
+                            device="cpu",
                         )
 
                     self.assertEqual(result["model_key"], key)
                     if family == "xtts":
-                        load_xtts.assert_called_once_with(artifacts)
+                        load_xtts.assert_called_once_with(artifacts, "cpu")
                         fake_xtts.inference.assert_called_once()
                         save_waveform.assert_called_once()
                         load_tts.assert_not_called()
@@ -137,7 +138,7 @@ class InferenceDispatchTests(unittest.TestCase):
                         self.assertEqual(piper_synth.call_args.kwargs["onnx_path"], artifacts["checkpoint"])
                         load_tts.assert_not_called()
                     else:
-                        load_tts.assert_called_once()
+                        load_tts.assert_called_once_with(artifacts, None, "cpu")
                         runtime.tts_to_file.assert_called_once()
 
     def test_styletts2_routes_to_local_optional_adapter_with_reference_wav(self):

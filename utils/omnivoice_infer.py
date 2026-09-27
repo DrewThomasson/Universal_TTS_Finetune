@@ -14,8 +14,8 @@ import soundfile as sf
 from omnivoice.models.omnivoice import OmniVoice
 from omnivoice.utils.lora import load_lora_adapter
 
-base_model, adapter, language, text, output = sys.argv[1:]
-model = OmniVoice.from_pretrained(base_model, device_map="auto", dtype=torch.float16)
+base_model, adapter, language, text, output, device = sys.argv[1:]
+model = OmniVoice.from_pretrained(base_model, device_map=device, dtype=torch.float32 if device == "cpu" else torch.float16)
 model = load_lora_adapter(model, adapter)
 audio = model.generate(text=text, language=language)
 sf.write(output, audio[0], model.sampling_rate)
@@ -23,7 +23,7 @@ sf.write(output, audio[0], model.sampling_rate)
 
 
 def synthesize_omnivoice(artifacts: dict, text: str, language: str, output_path: str | Path,
-                         progress=None) -> Path:
+                         progress=None, device: str = "auto") -> Path:
     """Run the upstream `OmniVoice.from_pretrained` + LoRA + `generate` flow.
 
     OmniVoice has a separate Transformers dependency stack, so all model imports
@@ -52,7 +52,7 @@ def synthesize_omnivoice(artifacts: dict, text: str, language: str, output_path:
     try:
         completed = subprocess.run(
             [str(python), "-c", _INFER_SCRIPT, artifacts.get("base_model") or artifacts.get("pretrained_model_id", "k2-fsa/OmniVoice"),
-             str(checkpoint), language, text, str(destination)],
+             str(checkpoint), language, text, str(destination), device],
             capture_output=True, text=True, env=env, timeout=900,
         )
     except subprocess.TimeoutExpired as exc:

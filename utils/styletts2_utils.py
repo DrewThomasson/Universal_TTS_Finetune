@@ -186,6 +186,7 @@ def train_styletts2(
     stream_logs: bool = True,
     progress: ProgressCallback | None = None,
     dry_run: bool = False,
+    device: str = "auto",
 ) -> dict[str, Any]:
     """Fine-tune official StyleTTS2; caller supplies local repo and weights.
 
@@ -206,7 +207,7 @@ def train_styletts2(
         raise ValueError(f"StyleTTS2 needs at least {batch_size} training clips for batch size {batch_size}.")
 
     gpu_total_gib = None
-    if not dry_run:
+    if not dry_run and device != "cpu":
         cuda_probe = subprocess.run(
             [python_executable, "-c", "import torch,sys; print(torch.cuda.get_device_properties(0).total_memory / 1024**3, torch.cuda.mem_get_info(0)[0] / 1024**3) if torch.cuda.is_available() else sys.exit(1)"],
             check=False,
@@ -257,13 +258,17 @@ def train_styletts2(
         config = yaml.safe_load(stream)
     if not isinstance(config, dict):
         raise ValueError(f"Invalid upstream StyleTTS2 config: {paths['config']}")
-    config.update({"log_dir": str(log_dir), "epochs": int(epochs), "batch_size": int(batch_size), "device": "cuda"})
+    config.update({"log_dir": str(log_dir), "epochs": int(epochs), "batch_size": int(batch_size), "device": device if device != "auto" else "cuda"})
     if gpu_total_gib is not None and gpu_total_gib < 16:
         # The official recipe's 400-frame crops and SLM adversarial phase can
         # overrun a 12 GiB card. Keep the initial acoustic fine-tuning stage.
         config["max_len"] = min(int(config.get("max_len", 400)), 96)
         config.setdefault("loss_params", {})["joint_epoch"] = int(epochs) + 1
         _notify(progress, f"StyleTTS2 low-memory profile: {gpu_total_gib:.1f} GiB GPU, max_len={config['max_len']}, SLM adversarial phase disabled.")
+    if device == "cpu":
+        config["max_len"] = min(int(config.get("max_len", 400)), 96)
+        config.setdefault("loss_params", {})["joint_epoch"] = int(epochs) + 1
+        _notify(progress, "StyleTTS2 CPU profile: short frame crops and initial acoustic stage only; training can take many hours.")
     config["save_freq"] = 1
     config["pretrained_model"] = str(paths["checkpoint"])
     config["second_stage_load_pretrained"] = True
@@ -286,13 +291,24 @@ def train_styletts2(
     staged_config = root / "config_ft.yml"
     staged_config.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     log_path = root / "training.log"
+    train_script = paths["train_script"]
+    if device == "cpu":
+        # The upstream validation loop hardcodes one CUDA mask. Stage the
+        # official script with that device literal corrected in this run only.
+        train_script = root / "train_finetune_cpu.py"
+        script_source = paths["train_script"].read_text(encoding="utf-8")
+        old = "length_to_mask(mel_input_length // (2 ** n_down)).to('cuda')"
+        if script_source.count(old) != 1:
+            raise ValueError("The StyleTTS2 upstream CPU compatibility point changed; review its validation device code.")
+        train_script.write_text(script_source.replace(old, "length_to_mask(mel_input_length // (2 ** n_down)).to(device)"), encoding="utf-8")
     command = [
         python_executable,
         "-m",
         "accelerate.commands.launch",
-        "--mixed_precision=fp16",
+        "--mixed_precision=no" if device == "cpu" else "--mixed_precision=fp16",
+        *(["--cpu"] if device == "cpu" else []),
         "--num_processes=1",
-        str(paths["train_script"]),
+        str(train_script),
         "--config_path",
         str(staged_config),
     ]
@@ -310,6 +326,7 @@ def train_styletts2(
         "log_path": str(log_path),
         "command": command,
         "gpu_total_gib": gpu_total_gib,
+        "device": "cpu" if device == "cpu" else "cuda",
     }
     if dry_run:
         result["status"] = "dry-run"
@@ -317,6 +334,9 @@ def train_styletts2(
 
     _notify(progress, "Starting official StyleTTS2 fine-tuning...")
     environment = os.environ.copy()
+    if device == "cpu":
+        environment["CUDA_VISIBLE_DEVICES"] = ""
+        environment["PYTHONPATH"] = str(paths["repo"]) + os.pathsep + environment.get("PYTHONPATH", "")
     environment.setdefault("TOKENIZERS_PARALLELISM", "false")
     if gpu_total_gib is not None and gpu_total_gib < 16:
         environment.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -374,7 +394,7 @@ def train_styletts2(
     if return_code:
         raise RuntimeError(
             f"StyleTTS2 fine-tuning exited with status {return_code}. See {log_path}. "
-            "The upstream runner requires a CUDA device and compatible local assets."
+            "Check the staged CPU/CUDA log and official runtime assets."
         )
 
     checkpoints = sorted(log_dir.glob("epoch_2nd_*.pth"), key=lambda item: item.stat().st_mtime)

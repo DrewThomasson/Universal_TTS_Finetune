@@ -1291,6 +1291,7 @@ def _patch_recipe_script(
     extra_overrides: dict[str, Any],
     reference_wav: str,
     extra_phonemes: str,
+    device: str = "auto",
 ) -> list[str]:
     source = script_path.read_text(encoding="utf-8")
     if trusted_pretrained_restore:
@@ -1322,7 +1323,7 @@ def _patch_recipe_script(
         f'data_path=r"{wavs_str}"',
     )
     source = _replace_literal(source, 'python TTS/bin/compute_attention_masks.py', 'python -m TTS.bin.compute_attention_masks')
-    if not torch.cuda.is_available():
+    if device == "cpu" or (device == "auto" and not torch.cuda.is_available()):
         source = source.replace('--use_cuda"', '"')
         source = source.replace('--use_cuda\'"', '\'"')
 
@@ -1700,7 +1701,10 @@ def train_model(
     stream_logs: bool = True,
     sample_epoch_interval: int = 0,
     sample_text: str = "",
+    device: str = "auto",
 ) -> dict[str, Any]:
+    from utils.device import select_device, child_environment
+    selected_device = select_device(device)
     spec = get_model_spec(model_key)
     language = language.lower().replace("_", "-") if model_key in {"mms_vits", "omnivoice"} else normalize_language(language)
     if spec.family == "xtts" and not pretrained_model_choices(model_key, language):
@@ -1756,7 +1760,7 @@ def train_model(
         return train_f5tts(dataset_dir=dataset_root, training_root=training_root, language=language,
                            epochs=epochs, batch_size=batch_size, grad_accum=grad_accum,
                            max_audio_seconds=max_audio_seconds, restore_path=restore_path,
-                           python_executable=overrides.get("f5tts_python"), dry_run=dry_run, progress=progress)
+                           python_executable=overrides.get("f5tts_python"), dry_run=dry_run, progress=progress, device=selected_device)
 
     if spec.family in {"styletts2", "omnivoice"}:
         if grad_accum != 1:
@@ -1812,6 +1816,7 @@ def train_model(
                 steps=steps, save_steps=steps, batch_tokens=512,
                 progress_callback=progress,
                 python_executable=overrides.get("omnivoice_python") or os.environ.get("UFT_OMNIVOICE_PYTHON") or sys.executable,
+                device=selected_device,
             )
             checkpoints = sorted(checkpoint_dir.glob("checkpoint-*"), key=lambda path: path.stat().st_mtime)
             if not checkpoints:
@@ -1824,7 +1829,7 @@ def train_model(
             shutil.copytree(checkpoints[-1], packaged_checkpoint)
             adapter_artifacts_path = training_root / "artifacts.json"
             adapter_metadata = json.loads(adapter_artifacts_path.read_text(encoding="utf-8")) if adapter_artifacts_path.is_file() else {}
-            artifacts = {"model_key": model_key, "model_label": spec.label, "family": spec.family, "training_root": str(training_root), "dataset_dir": str(dataset_root), "checkpoint": str(packaged_checkpoint), "training_checkpoint": str(checkpoints[-1]), "checkpoint_dir": str(checkpoint_dir), "config": adapter_metadata.get("train_config", str(training_root / "omnivoice_work" / "config" / "train.json")), "adapter_artifacts_file": str(adapter_artifacts_path) if adapter_artifacts_path.is_file() else "", "pretrained_model_id": spec.official_model_id, "base_model": adapter_metadata.get("base_model", spec.official_model_id), "trained_steps": steps, "language": language, "python_executable": adapter_metadata.get("python_executable", overrides.get("omnivoice_python") or os.environ.get("UFT_OMNIVOICE_PYTHON") or sys.executable), "inference_note": "Inference uses the official OmniVoice LoRA loader in the isolated OmniVoice environment. E2A export is unavailable."}
+            artifacts = {"model_key": model_key, "model_label": spec.label, "family": spec.family, "training_root": str(training_root), "dataset_dir": str(dataset_root), "checkpoint": str(packaged_checkpoint), "training_checkpoint": str(checkpoints[-1]), "checkpoint_dir": str(checkpoint_dir), "config": adapter_metadata.get("train_config", str(training_root / "omnivoice_work" / "config" / "train.json")), "adapter_artifacts_file": str(adapter_artifacts_path) if adapter_artifacts_path.is_file() else "", "pretrained_model_id": spec.official_model_id, "base_model": adapter_metadata.get("base_model", spec.official_model_id), "trained_steps": steps, "language": language, "device": selected_device, "python_executable": adapter_metadata.get("python_executable", overrides.get("omnivoice_python") or os.environ.get("UFT_OMNIVOICE_PYTHON") or sys.executable), "inference_note": "Inference uses the official OmniVoice LoRA loader in the isolated OmniVoice environment. E2A export is unavailable."}
             (ready_dir / "artifacts.json").write_text(json.dumps(artifacts, indent=2), encoding="utf-8")
             artifacts["artifacts_file"] = str(ready_dir / "artifacts.json")
             return artifacts
@@ -1849,9 +1854,13 @@ def train_model(
             stream_logs=stream_logs,
             progress=progress,
             dry_run=dry_run,
+            device=selected_device,
         )
 
     if model_key == "piper":
+        # Keep Piper's existing MPS choice for Auto on Apple Silicon.
+        piper_device = device if device == "auto" else selected_device
+        piper_actual_device = "mps" if device == "auto" and selected_device == "cpu" and torch.backends.mps.is_available() else selected_device
         if pretrained_model_id and (restore_path or not use_pretrained):
             raise ValueError("Select either a local Piper restore path or a pretrained checkpoint, and enable pretrained loading.")
         from utils.piper_utils import (
@@ -1928,6 +1937,7 @@ def train_model(
             "espeak_language": espeak_language,
             "sample_rate": sample_rate,
             "quality": quality,
+            "device": piper_actual_device,
         }
         if dry_run:
             run_summary["status"] = "dry-run"
@@ -1956,7 +1966,8 @@ def train_model(
                 sample_epoch_interval=sample_epoch_interval,
                 sample_text=sample_text,
                 config_path=config_path,
-                output_dir=training_root
+                output_dir=training_root,
+                device=piper_device
             )
             log_path.write_text(log_output, encoding="utf-8")
         except Exception as e:
@@ -1996,6 +2007,7 @@ def train_model(
             "log_path": str(log_path),
             "pretrained_model_id": base_checkpoint_id,
             "unused_overrides": {},
+            "device": piper_actual_device,
         }
         artifacts_path = ready_dir / "artifacts.json"
         artifacts_path.write_text(json.dumps(_json_ready(artifacts), indent=2), encoding="utf-8")
@@ -2023,6 +2035,7 @@ def train_model(
         extra_overrides=extra_overrides,
         reference_wav=str(reference_wav) if reference_wav else "",
         extra_phonemes=extra_phonemes,
+        device=selected_device,
     )
 
     matching_models = pretrained_model_choices(model_key, language)
@@ -2037,6 +2050,7 @@ def train_model(
         "restore_path": computed_restore_path or "",
         "pretrained_model_id": selected_pretrained_id,
         "unused_overrides": unused_overrides,
+        "device": selected_device,
     }
     if dry_run:
         run_summary["status"] = "dry-run"
@@ -2053,7 +2067,8 @@ def train_model(
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
-        start_new_session=True
+        start_new_session=True,
+        env=child_environment(selected_device),
     )
     register_active_process(process)
     try:
@@ -2095,6 +2110,7 @@ def train_model(
     artifacts["trained_steps"] = trained_steps
     artifacts["pretrained_model_id"] = run_summary["pretrained_model_id"]
     artifacts["unused_overrides"] = unused_overrides
+    artifacts["device"] = selected_device
     Path(artifacts["artifacts_file"]).write_text(
         json.dumps(_json_ready({key: value for key, value in artifacts.items() if key != "artifacts_file"}), indent=2),
         encoding="utf-8",
@@ -2132,13 +2148,14 @@ def load_artifacts(artifacts_path_or_dir: str, model_key: str | None = None) -> 
     return artifacts
 
 
-def _load_xtts_runtime(artifacts: dict[str, Any]) -> Xtts:
+def _load_xtts_runtime(artifacts: dict[str, Any], device: str = "auto") -> Xtts:
     cache_key = json.dumps({
         "family": artifacts["family"],
         "checkpoint": artifacts["checkpoint"],
         "config": artifacts["config"],
         "vocab": artifacts.get("vocab"),
         "speaker_file": artifacts.get("speaker_file"),
+        "device": device,
     }, sort_keys=True)
     if cache_key in MODEL_CACHE:
         return MODEL_CACHE[cache_key]
@@ -2152,7 +2169,7 @@ def _load_xtts_runtime(artifacts: dict[str, Any]) -> Xtts:
         speaker_file_path=artifacts.get("speaker_file"),
         use_deepspeed=False,
     )
-    if torch.cuda.is_available():
+    if device == "cuda" or (device == "auto" and torch.cuda.is_available()):
         model.cuda()
     MODEL_CACHE[cache_key] = model
     return model
@@ -2166,13 +2183,14 @@ def _download_vocoder(vocoder_model_id: str | None, progress: ProgressCallback) 
     return vocoder_path, vocoder_config
 
 
-def _load_tts_runtime(artifacts: dict[str, Any], progress: ProgressCallback) -> TTS:
+def _load_tts_runtime(artifacts: dict[str, Any], progress: ProgressCallback, device: str = "auto") -> TTS:
     cache_key = json.dumps({
         "family": artifacts["family"],
         "checkpoint": artifacts["checkpoint"],
         "config": artifacts["config"],
         "vocoder": artifacts.get("vocoder_path"),
         "vocoder_config": artifacts.get("vocoder_config"),
+        "device": device,
     }, sort_keys=True)
     if cache_key in MODEL_CACHE:
         return MODEL_CACHE[cache_key]
@@ -2190,12 +2208,12 @@ def _load_tts_runtime(artifacts: dict[str, Any], progress: ProgressCallback) -> 
         if "model_dir" in inspect.signature(Synthesizer).parameters:
             runtime.synthesizer = Synthesizer(
                 model_dir=str(Path(artifacts["checkpoint"]).parent),
-                use_cuda=torch.cuda.is_available(),
+                use_cuda=(device == "cuda" or (device == "auto" and torch.cuda.is_available())),
             )
         else:
             runtime.synthesizer = Synthesizer(
                 tts_checkpoint=artifacts["checkpoint"],
-                use_cuda=torch.cuda.is_available(),
+                use_cuda=(device == "cuda" or (device == "auto" and torch.cuda.is_available())),
             )
     else:
         runtime = TTS(
@@ -2203,7 +2221,7 @@ def _load_tts_runtime(artifacts: dict[str, Any], progress: ProgressCallback) -> 
             config_path=artifacts["config"],
             vocoder_path=vocoder_path,
             vocoder_config_path=vocoder_config,
-            gpu=torch.cuda.is_available(),
+            gpu=(device == "cuda" or (device == "auto" and torch.cuda.is_available())),
             progress_bar=False,
         )
     MODEL_CACHE[cache_key] = runtime
@@ -2219,17 +2237,22 @@ def synthesize(
     language: str = "en",
     speaker_wav: str | None = None,
     progress: ProgressCallback = None,
+    device: str = "auto",
 ) -> dict[str, Any]:
     if not text.strip():
         raise ValueError("Text is required for synthesis.")
+    from utils.device import select_device
+    selected_device = select_device(device)
     artifacts = load_artifacts(artifacts_path_or_dir, model_key=model_key)
+    if artifacts["family"] == "piper" and device == "cuda":
+        raise ValueError("Piper ONNX inference uses CPU; choose Auto or CPU for synthesis.")
     output_path = _resolve_user_path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     speaker_reference = speaker_wav or artifacts.get("reference_wav")
 
     if artifacts.get("family") == "f5_tts":
         from utils.f5tts_utils import synthesize_f5tts
-        output_path = synthesize_f5tts(artifacts, text, language, speaker_reference, output_path, progress)
+        output_path = synthesize_f5tts(artifacts, text, language, speaker_reference, output_path, progress, device=selected_device)
     elif artifacts.get("family") == "styletts2":
         from utils.styletts2_infer import synthesize_styletts2
         return synthesize_styletts2(
@@ -2238,6 +2261,7 @@ def synthesize(
             reference_wav=speaker_reference,
             output_file=output_path,
             progress=progress,
+            device=device if device == "auto" else selected_device,
         )
     elif artifacts.get("family") == "omnivoice":
         from utils.omnivoice_infer import synthesize_omnivoice
@@ -2246,12 +2270,12 @@ def synthesize(
         language = language or artifacts.get("language", "en")
         if not pretrained_model_choices("omnivoice", language):
             raise ValueError(f"OmniVoice has no published checkpoint for language {language}.")
-        output_path = synthesize_omnivoice(artifacts, text, language, output_path, progress=progress)
+        output_path = synthesize_omnivoice(artifacts, text, language, output_path, progress=progress, device=device if device == "auto" else selected_device)
     elif artifacts["family"] == "xtts":
         if not speaker_reference:
             raise ValueError("XTTS inference requires a speaker reference WAV.")
         _notify(progress, "Loading XTTS model...")
-        model = _load_xtts_runtime(artifacts)
+        model = _load_xtts_runtime(artifacts, selected_device)
         gpt_cond_latent, speaker_embedding = model.get_conditioning_latents(
             audio_path=speaker_reference,
             gpt_cond_len=model.config.gpt_cond_len,
@@ -2284,7 +2308,7 @@ def synthesize(
         )
     else:
         _notify(progress, "Loading TTS model...")
-        runtime = _load_tts_runtime(artifacts, progress)
+        runtime = _load_tts_runtime(artifacts, progress, selected_device)
         _notify(progress, "Generating speech...")
         runtime.tts_to_file(text=text, file_path=str(output_path), split_sentences=True)
 
