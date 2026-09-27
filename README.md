@@ -1,6 +1,6 @@
 # Universal TTS Finetune
 
-Supports 1,007+ languages!
+Supports 1,107+ languages!
 
 Prepare recordings, fine-tune a TTS model, and try the result in your browser. UFT has 20 training engines and runs independently of [ebook2audiobook](https://github.com/DrewThomasson/ebook2audiobook).
 
