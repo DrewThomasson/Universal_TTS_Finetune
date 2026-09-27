@@ -1,9 +1,12 @@
 services:
   universal-tts:
+    user: "${UFT_UID:-1000}:${UFT_GID:-1000}"
     build:
       context: .
       args:
         UFT_CPU_TORCH: "1"
+        UFT_UID: "${UFT_UID:-1000}"
+        UFT_GID: "${UFT_GID:-1000}"
     ports:
       - "7862:7862"
     volumes:

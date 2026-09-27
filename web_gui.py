@@ -50,7 +50,7 @@ from utils.pipeline import (
 )
 from utils.model_registry import MMS_LANGUAGES, OMNIVOICE_LANGUAGES, XTTS_LANGUAGES, pretrained_model_choices
 from utils.asr import MMS_ASR_LANGUAGES
-from utils.e2a_export import export_e2a_zip
+from utils.e2a_export import E2A_FILES, export_e2a_zip
 from utils.language_support import coqui_phoneme_language
 from utils.resource_guidance import training_resource_guidance
 
@@ -653,6 +653,10 @@ def on_model_change(selected_model):
     return (gr.update(visible=True), gr.update(visible=True)) if req else (gr.update(visible=False, value=None), gr.update(visible=False, value=None))
 
 
+def update_e2a_export_visibility(model_key):
+    return gr.update(visible=model_key in E2A_FILES)
+
+
 def on_select_speaker(selected_dir, speakers_state):
     if not selected_dir or not speakers_state:
         return gr.update(), "", None, "", gr.update()
@@ -721,10 +725,9 @@ def update_training_options(model_key, language, use_pretrained, pretrained_mode
         if language != "en":
             return "❌ StyleTTS2 currently supports English fine-tuning only.", gr.update(value=True, interactive=False)
         return (
-            "🟡 **StyleTTS2** uses the official LibriTTS base checkpoint. Set `UFT_STYLETTS2_REPO` "
-            "to an official StyleTTS2 checkout and `UFT_STYLETTS2_CHECKPOINT` to a local base checkpoint "
-            "before training. Its optional dependencies must be installed separately. Batch size 2 and gradient "
-            "accumulation 1 are required; inference uses the local official LibriTTS runtime, and E2A export is unavailable.",
+            "**StyleTTS2:** First training use downloads the official runtime and weights "
+            "(about 1 GB plus Python packages) into `models/styletts2/`. Later runs reuse them. Use English and batch size 2; "
+            "inference needs a speaker reference WAV. E2A export is unavailable.",
             gr.update(value=True, interactive=False),
         )
 
@@ -732,10 +735,11 @@ def update_training_options(model_key, language, use_pretrained, pretrained_mode
         if not choices:
             return f"❌ OmniVoice does not publish support for `{language}`.", gr.update(value=True, interactive=False)
         return (
-            f"🟡 **OmniVoice** uses `{official_model_id}` for the published language ID `{language}`. "
-            "Set `UFT_OMNIVOICE_PYTHON` to the optional OmniVoice environment. The base model, audio tokenizer, "
-            "and Qwen3-0.6B must already be cached there; UFT will not download them. Batch size and gradient "
-            "accumulation are fixed at 1. Inference uses the official LoRA API in that environment. E2A export is unavailable.",
+            f"**OmniVoice** uses `{official_model_id}` for `{language}`. First training use installs an isolated uv runtime "
+            "and downloads about 5 GB of model files; later runs reuse them. Its weights are "
+            "[noncommercial](https://huggingface.co/k2-fsa/OmniVoice) and the audio tokenizer has a "
+            "[separate license](https://huggingface.co/k2-fsa/OmniVoice/blob/main/audio_tokenizer/LICENSE). "
+            "Batch size and gradient accumulation are fixed at 1. E2A export is unavailable.",
             gr.update(value=True, interactive=False),
         )
 
@@ -1083,10 +1087,11 @@ if __name__ == "__main__":
             used_reference_audio = gr.Audio(label="Reference audio used")
             inspect_btn = gr.Button(value="Inspect artifacts")
             tts_btn = gr.Button(value="Step 3 - Generate speech", elem_classes=["primary-btn"])
-            gr.Markdown("### E2A custom model upload")
-            e2a_export_btn = gr.Button(value="Create E2A upload ZIP")
-            e2a_export_status = gr.Textbox(label="Export status", interactive=False)
-            e2a_export_file = gr.File(label="Download E2A ZIP", interactive=False)
+            with gr.Group() as e2a_export_group:
+                gr.Markdown("### E2A custom model upload")
+                e2a_export_btn = gr.Button(value="Create E2A upload ZIP")
+                e2a_export_status = gr.Textbox(label="Export status", interactive=False)
+                e2a_export_file = gr.File(label="Download E2A ZIP", interactive=False)
 
         prepare_btn.click(
             fn=preprocess_dataset,
@@ -1342,7 +1347,7 @@ if __name__ == "__main__":
         train_device.change(fn=training_resource_guidance, inputs=[model_key, train_device], outputs=[training_resources])
         model_key.change(
             fn=lambda model: gr.update(
-                label="Local StyleTTS2 base checkpoint" if model == "styletts2" else "Restore path unavailable" if model in {"omnivoice", "f5_tts"} else "Optional checkpoint to continue from",
+                label="Optional custom StyleTTS2 base checkpoint" if model == "styletts2" else "Restore path unavailable" if model in {"omnivoice", "f5_tts"} else "Optional checkpoint to continue from",
                 value="",
                 interactive=model not in {"omnivoice", "f5_tts"},
             ),
@@ -1394,6 +1399,11 @@ if __name__ == "__main__":
             fn=on_model_change,
             inputs=[infer_model_key],
             outputs=[speaker_reference_audio, used_reference_audio],
+        )
+        infer_model_key.change(
+            fn=update_e2a_export_visibility,
+            inputs=[infer_model_key],
+            outputs=[e2a_export_group],
         )
         infer_model_key.change(
             fn=update_finetune_language_choices,

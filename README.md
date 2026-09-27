@@ -11,6 +11,8 @@ Clone and run UFT on its own:
 ```bash
 git clone https://github.com/DrewThomasson/Universal_TTS_Finetune.git
 cd Universal_TTS_Finetune
+mkdir -p models finetune_models audio_data
+export UFT_UID=$(id -u) UFT_GID=$(id -g)
 docker compose up --build
 ```
 
@@ -57,29 +59,27 @@ The app stores prepared data under `<output_root>/dataset/` and finished models 
 
 ### Optional StyleTTS2 engine
 
-This adapter reuses the prepared UFT dataset and runs the official training code. Its dependencies and model weights are optional; the base Docker image does not include them. Choose batch size **2**, gradient accumulation **1**, and English in the GUI or CLI. Upstream's predictor fails at batch size 1.
+Select **StyleTTS2** and start training. On first use, UFT downloads the official runtime and weights into `models/styletts2/` and creates a separate uv environment. Later runs reuse them. You can prepare it in advance with:
 
-- **StyleTTS2:** English only; CUDA was verified, while its new CPU training path has not completed a smoke test. Clone the [official source](https://github.com/yl4579/StyleTTS2), install its requirements in a separate compatible Python environment, and obtain its [LibriTTS base checkpoint and required ASR/JDC/PL-BERT assets](https://github.com/yl4579/StyleTTS2#pre-trained-models). Set `UFT_STYLETTS2_REPO` to that checkout, `UFT_STYLETTS2_CHECKPOINT` to the local LibriTTS `.pth`, and `UFT_STYLETTS2_PYTHON` to the interpreter with the official dependencies if different from UFT's. The adapter keeps generated data in the UFT output folder and never downloads these assets for you.
+```bash
+python setup_styletts2.py
+```
 
-The adapter records its checkpoint in `ready/artifacts.json`. For inference, select the run in UFT, upload a speaker reference WAV, and use the local official-requirements Python environment when needed by setting `UFT_STYLETTS2_PYTHON`. The checkout path can be set with `UFT_STYLETTS2_REPO`. Inference defaults to CPU; opt into CUDA with `UFT_STYLETTS2_INFER_DEVICE=cuda`. It uses local assets only and does not download weights or dependencies. E2A upload ZIP is unavailable for this format.
+Use English and batch size **2**. Inference needs a speaker reference WAV. CUDA training has been smoke tested; CPU training can take many hours and has not completed a smoke test. [The official LibriTTS model](https://github.com/yl4579/StyleTTS2#pre-trained-models) requires disclosure of synthetic speech unless you have permission to clone the voice. E2A upload ZIP is unavailable for this format.
+
+For Docker, the first training run also installs into the mounted `models/` folder. To install before training, run `docker compose exec universal-tts python setup_styletts2.py` (add `--cpu` with CPU Compose).
 
 ### OmniVoice (optional)
 
-OmniVoice LoRA fine-tuning and inference use a separate environment because its Transformers dependencies can conflict with UFT's Coqui stack. Set `UFT_OMNIVOICE_PYTHON` to that environment's Python executable and install the official `k2-fsa/OmniVoice` requirements plus `peft>=0.20`. Keep its official base model, audio tokenizer, and Qwen3-0.6B assets cached locally before starting; UFT runs offline and does not fetch models or dependencies. The trainer uses batch size 1 and gradient accumulation 1. It writes the selected published `language_id` into every training manifest.
-
-Completed runs store their LoRA checkpoint, base model, and isolated interpreter in `ready/artifacts.json`. UFT inference loads the adapter through OmniVoice's official LoRA API in that same environment. The language picker contains the IDs from OmniVoice's published catalog; catalog presence represents published coverage, not language-by-language UFT validation. Scratch training, resume from a local checkpoint, and E2A export are unsupported for this adapter.
-
-For CUDA training, use Linux with at least 16 GiB total and 12 GiB free GPU memory. CPU training requires Linux and at least 16 GiB available system RAM; it has not completed a UFT smoke test. The base Docker image does not include OmniVoice's optional environment. Create a separate uv environment, install PyTorch for your device into it, then install OmniVoice:
+Select **OmniVoice** and start training. On first use, UFT installs a separate uv environment and downloads its base models (about 5 GB); later runs reuse them. You can prepare them in advance with:
 
 ```bash
-uv venv --python 3.12 ../omnivoice-env
-uv pip install --python ../omnivoice-env/bin/python 'git+https://github.com/k2-fsa/OmniVoice.git@08be0b4ccbac3e13e374e86fbfead4b4cac343e2' 'peft>=0.20'
-export UFT_OMNIVOICE_PYTHON="$PWD/../omnivoice-env/bin/python"
+python setup_omnivoice.py
 ```
 
-Cache `k2-fsa/OmniVoice`, `eustlb/higgs-audio-v2-tokenizer`, and `Qwen/Qwen3-0.6B` in the same Hugging Face cache used by UFT (`UFT_MODELS_DIR`) before training. Keep that cache available for inference; the packaged LoRA adapter needs its base model.
+CUDA training needs Linux, at least 16 GiB total GPU memory and 12 GiB free. CPU training needs Linux and at least 16 GiB available RAM; use `python setup_omnivoice.py --cpu` to prepare it in advance. The published language picker follows OmniVoice's catalog; individual languages have not all been smoke tested. [OmniVoice weights](https://huggingface.co/k2-fsa/OmniVoice) are noncommercial, and the [audio tokenizer has a separate license](https://huggingface.co/k2-fsa/OmniVoice/blob/main/audio_tokenizer/LICENSE). Do not use it for unauthorized voice cloning or impersonation. E2A export is unavailable.
 
-Use the pinned official source revision above: the PyPI `0.2.1` wheel lacks the required LoRA APIs.
+With Docker, first training use stores the optional runtime in the mounted `models/` folder. To install ahead of time, run `docker compose exec universal-tts python setup_omnivoice.py` (add `--cpu` with CPU Compose).
 
 For an E2A custom voice, load the finished run in **Inference** and click **Create E2A upload ZIP**. This supports XTTS v1/v2, VITS, MMS/Fairseq VITS, and Piper, and packages the exact filenames E2A requires. Other UFT engines are not accepted by E2A's custom model upload. You can also run `python headless_cli.py export-e2a --artifacts /path/to/ready/artifacts.json --output-file /path/to/voice.zip`.
 

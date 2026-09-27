@@ -1,8 +1,7 @@
-"""Standalone, guarded adapter for fine-tuning the upstream OmniVoice model.
+"""Guarded adapter for fine-tuning the upstream OmniVoice model.
 
-The function in this module deliberately does not install packages or fetch
-models. Install ``omnivoice`` and its LoRA dependency (PEFT) in the configured
-OmniVoice Python environment and cache the base model/tokenizer before a run.
+The pipeline prepares the optional runtime before calling this local-only
+trainer; training itself never fetches model files.
 """
 from __future__ import annotations
 
@@ -41,17 +40,21 @@ def _require_module(module: str, install_hint: str, python: str) -> None:
         )
 
 
-def _local_hf_snapshot(repo_id: str, python: str) -> Path:
+def _local_hf_snapshot(repo_id: str, python: str, *, revision: str | None = None,
+                       hf_home: str | None = None) -> Path:
     """Resolve a cached HF snapshot only; never initiate a network download."""
     probe = (
         "from huggingface_hub import snapshot_download; "
-        "print(snapshot_download(repo_id=%r, local_files_only=True))" % repo_id
+        "print(snapshot_download(repo_id=%r, revision=%r, local_files_only=True))" % (repo_id, revision)
     )
-    result = subprocess.run([python, "-c", probe], capture_output=True, text=True)
+    environment = os.environ.copy()
+    if hf_home:
+        environment["HF_HOME"] = hf_home
+    result = subprocess.run([python, "-c", probe], capture_output=True, text=True, env=environment)
     if result.returncode:
         raise RuntimeError(
             f"Required checkpoint '{repo_id}' is not cached locally. Download/cache it "
-            "explicitly before starting a run; this adapter never downloads model files. "
+            "with `python setup_omnivoice.py` before retrying. "
             f"Resolver output: {result.stderr.strip()}"
         )
     return Path(result.stdout.strip().splitlines()[-1])
@@ -231,6 +234,7 @@ def run_omnivoice_finetune(
     min_free_disk_gib: float = 20.0,
     max_dataset_audio_gib: float = 50.0,
     python_executable: str | Path | None = None,
+    hf_home: str | None = None,
     progress_callback: Callable[[str], None] | None = None,
     device: str = "auto",
 ) -> Path:
@@ -290,11 +294,12 @@ def run_omnivoice_finetune(
     # Force local-only resolution before any work directory or subprocess is created.
     base_path = Path(base_model).expanduser()
     if not base_path.exists():
-        base_path = _local_hf_snapshot(base_model, python)
+        base_path = _local_hf_snapshot(base_model, python, hf_home=hf_home)
     tokenizer_path = Path(audio_tokenizer).expanduser()
     if not tokenizer_path.exists():
-        tokenizer_path = _local_hf_snapshot(audio_tokenizer, python)
-    llm_path = _local_hf_snapshot("Qwen/Qwen3-0.6B", python)
+        tokenizer_path = _local_hf_snapshot(audio_tokenizer, python, hf_home=hf_home)
+    from setup_omnivoice import QWEN_REVISION
+    llm_path = _local_hf_snapshot("Qwen/Qwen3-0.6B", python, revision=QWEN_REVISION if hf_home else None, hf_home=hf_home)
 
     out = Path(output_dir).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -322,6 +327,8 @@ def run_omnivoice_finetune(
 
     # Pin offline mode so transitive HF loaders cannot unexpectedly fetch weights.
     env = os.environ.copy()
+    if hf_home:
+        env["HF_HOME"] = hf_home
     if device == "cpu":
         env["CUDA_VISIBLE_DEVICES"] = ""
     env.update({
@@ -444,6 +451,7 @@ def run_omnivoice_finetune(
     artifact_path.write_text(json.dumps({
         "model_type": "omnivoice",
         "python_executable": python,
+        "hf_home": hf_home or "",
         "base_model": str(base_path),
         "checkpoint": str(out / "checkpoints" / f"checkpoint-{steps}"),
         "checkpoint_dir": str(out / "checkpoints"),
