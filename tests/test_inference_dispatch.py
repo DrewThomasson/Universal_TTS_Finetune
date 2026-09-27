@@ -157,6 +157,21 @@ class InferenceDispatchTests(unittest.TestCase):
             self.assertEqual(adapter_call.call_args.kwargs["reference_wav"], "reference.wav")
             self.assertEqual(result["model_key"], "styletts2")
 
+    def test_styletts2_rejects_unsupported_inference_language_before_runtime(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifacts = {"family": "styletts2", "model_key": "styletts2", "language": "en"}
+            adapter_call = Mock()
+            adapter = _module("utils.styletts2_infer", synthesize_styletts2=adapter_call)
+            with patch.object(pipeline, "load_artifacts", return_value=artifacts), \
+                 patch.dict(sys.modules, {"utils.styletts2_infer": adapter}):
+                with self.assertRaisesRegex(ValueError, "StyleTTS2 supports English only"):
+                    pipeline.synthesize(
+                        artifacts_path_or_dir=str(root), text="sample", speaker_wav="reference.wav",
+                        output_file=str(root / "out.wav"), language="es",
+                    )
+            adapter_call.assert_not_called()
+
     def test_omnivoice_routes_to_isolated_optional_inference(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

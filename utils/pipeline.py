@@ -2281,6 +2281,9 @@ def synthesize(
         from utils.f5tts_utils import synthesize_f5tts
         output_path = synthesize_f5tts(artifacts, text, language, speaker_reference, output_path, progress, device=selected_device)
     elif artifacts.get("family") == "styletts2":
+        language = language or artifacts.get("language", "en")
+        if not pretrained_model_choices("styletts2", language):
+            raise ValueError(f"StyleTTS2 supports English only; no checkpoint is available for language {language}.")
         from utils.styletts2_infer import synthesize_styletts2
         return synthesize_styletts2(
             artifacts=artifacts,
