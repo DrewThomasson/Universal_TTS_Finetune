@@ -15,7 +15,7 @@ Use this checklist when adding an engine or changing its training and inference 
 
 ## Recorded results
 
-Updated 2026-09-26. **Pass** means the linked report establishes that check. **—** means unverified in this record, not a failure. Results belong to their tested commits; this is not a full-suite run at the current head.
+Updated 2026-09-27. **Pass** means the linked report establishes that check. **—** means unverified in this record, not a failure. Results belong to their tested commits; this is not a full-suite run at the current head.
 
 | Engine | Training | Artifact | CLI inference | GUI inference callback | Training language | Tested SHA |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -36,25 +36,25 @@ Updated 2026-09-26. **Pass** means the linked report establishes that check. **�
 | xtts_v2 | 45 steps | Pass | — | — | en | 31296e7f |
 | piper | 90 / 24 batches | ONNX | — | — | es_ES / es_MX | 3ae2798c |
 | mms_vits (Fairseq) | 50 steps | Pass | —* | — | eng | e36d0a6 |
-| styletts2 | 10 steps | Pass | Pass | Pass | en | db67c2a |
-| omnivoice | 10 LoRA steps | Pass | Pass: en/es | Pass: es | en | 550ec3a |
+| styletts2 | 2 CPU / 2 CUDA steps | Pass | Pass | Pass + browser | en | bcb16b7 / 0e14574; inference 80e9f7d |
+| omnivoice | 2 CPU / 2 CUDA LoRA steps | Pass | Pass: en/es | Pass: es + browser | en | 0e14574; device-switch retest below |
 | f5_tts | 11 / 3 steps | Pass | Pass: en/zh-cn | Pass: en/zh-cn | en / zh-cn | 3562404 |
 
 * MMS's exported model reloaded and generated a valid WAV; a separate CLI inference check is not established by its report.
 
 ## Coverage and limitations
 
-- The CPU device picker and CLI flag have routing tests, and resource guidance covers all 20 registered engines. Align TTS completed four CPU optimizer steps and produced a packaged checkpoint in a bounded 16 GiB / 4 CPU container, using seven short training clips and one evaluation clip. Piper completed a CPU x-low epoch with 8/8 batches and saved a checkpoint; ONNX export was not rerun. The new CPU Compose image built with PyTorch 2.11.0+cpu, imported TorchCodec, and served the GUI over HTTP. The other 18 engines still need their own CPU optimizer-step verification. Optional F5-TTS, StyleTTS2 and OmniVoice CPU routes have interface/adapter checks only. The PR report records commands and retries.
-- The original 16 engines have historical training/packaging passes across several E2A component commits. Their shared GUI/Docker checks do not establish actual GUI inference for each engine.
-- MMS's exported model reloaded and generated audio; Docker runtime was blocked on the tested host.
-- StyleTTS2 and OmniVoice passed GUI HTTP startup and real inference callbacks. A complete browser walkthrough is not recorded. Their optional runtimes are not bundled into or runtime-tested in the base Docker image.
-- StyleTTS2 was tested in English on a 12 GB RTX 3060. Its guarded profile skips joint SLM adversarial training.
-- OmniVoice was trained in English on a 24 GB RTX 3090; English/Spanish inference passed. The 646 published language IDs were catalog-validated, not individually trained. Scratch training, local resume, reference voice cloning and E2A export are not exposed for its LoRA adapter.
+- CPU optimizer steps are recorded for Align TTS, Piper, StyleTTS2 and OmniVoice. The other 16 engines have not established CPU training passes here. Align completed four steps in a bounded 16 GiB / 4 CPU container; Piper completed 8/8 CPU batches (ONNX export was not rerun).
+- The original 16 engines have historical training/packaging passes across several E2A component commits. Shared GUI/Docker checks do not establish actual GUI inference for each engine. MMS's exported model reloaded and generated audio; its earlier Docker runtime check was blocked.
+- StyleTTS2 and OmniVoice passed automatic runtime setup, real CPU and CUDA training, packaging, CLI inference, GUI callbacks and browser audio playback. These were short synthetic English smoke datasets: StyleTTS2 used four training/two evaluation clips, batch two; OmniVoice used two training/one evaluation clips, batch one. Both completed one epoch and two optimizer steps on each device.
+- StyleTTS2 was tested on a 12 GB RTX 3060 and CPU. English is the supported language. The CPU/12 GB guarded profile trains the initial acoustic stage and skips joint SLM adversarial training. A moved artifact reloaded through the CLI, browser and Docker; pinned WavLM assets and automatic runtime relocation were checked. Initial CPU device errors and an incomplete validation batch were fixed and retried; full failure tracebacks were retained locally.
+- OmniVoice was trained on CPU and a rented 24 GB RTX 3090; English/Spanish inference passed. The 646 published language IDs were catalog-validated, not individually trained. Scratch training, local resume, reference voice cloning and E2A export are not exposed for its LoRA adapter. The cloud instance was destroyed after collecting results; an independent account check found zero instances.
+- CPU and CUDA Docker images built and served the GUI. Optional runtimes install automatically on first use into the mounted model cache; they are not preinstalled in the base image. See the latest PR report for artifact portability and CPU-to-CUDA inference checks. First-use downloads need network access and additional storage.
 - F5-TTS v1 passed English and Chinese smoke training on a 12 GB RTX 3060. Online weights changed from the base; both languages passed CLI/GUI inference, artifact loading and GUI HTTP startup. The base Docker image built and started successfully; its optional F5 runtime was installed separately in a temporary GPU container for these tests.
 - Language, transcription and export audits are separate from training/inference passes. Speech quality, long runs and every language/checkpoint variant remain unverified.
 
 ## Test reports
 
-[Original 16 engines](https://github.com/DrewThomasson/ebook2audiobook/pull/2107#issuecomment-5838669784) · [MMS](https://github.com/DrewThomasson/Universal_TTS_Finetune/pull/4#issuecomment-5842057557) · [StyleTTS2](https://github.com/DrewThomasson/Universal_TTS_Finetune/pull/6#issuecomment-5849246171) · [OmniVoice](https://github.com/DrewThomasson/Universal_TTS_Finetune/pull/6#issuecomment-5850234071) · [Language audit](https://github.com/DrewThomasson/Universal_TTS_Finetune/pull/4#issuecomment-5842806322) · [ASR/export](https://github.com/DrewThomasson/Universal_TTS_Finetune/pull/4#issuecomment-5842573562)
+[Automatic runtime retest](https://github.com/DrewThomasson/Universal_TTS_Finetune/pull/8) · [Original 16 engines](https://github.com/DrewThomasson/ebook2audiobook/pull/2107#issuecomment-5838669784) · [MMS](https://github.com/DrewThomasson/Universal_TTS_Finetune/pull/4#issuecomment-5842057557) · [StyleTTS2](https://github.com/DrewThomasson/Universal_TTS_Finetune/pull/6#issuecomment-5849246171) · [OmniVoice](https://github.com/DrewThomasson/Universal_TTS_Finetune/pull/6#issuecomment-5850234071) · [Language audit](https://github.com/DrewThomasson/Universal_TTS_Finetune/pull/4#issuecomment-5842806322) · [ASR/export](https://github.com/DrewThomasson/Universal_TTS_Finetune/pull/4#issuecomment-5842573562)
 
 For each retest, preserve the prior evidence and record the new commit, settings, result and report link. Do not assume an old pass applies to new code.

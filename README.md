@@ -11,6 +11,8 @@ Clone and run UFT on its own:
 ```bash
 git clone https://github.com/DrewThomasson/Universal_TTS_Finetune.git
 cd Universal_TTS_Finetune
+mkdir -p models finetune_models audio_data
+export UFT_UID=$(id -u) UFT_GID=$(id -g)
 docker compose up --build
 ```
 
