@@ -200,11 +200,13 @@ def train_styletts2(
         raise ValueError("StyleTTS2 needs at least one epoch and batch size 2 or greater; upstream fails at batch size 1.")
     dataset = Path(dataset_dir).expanduser().resolve()
     root = Path(training_root).expanduser().resolve()
-    paths = _validate_runtime(Path(styletts2_repo).expanduser().resolve(), Path(pretrained_checkpoint).expanduser().resolve(), python_executable)
     train_rows = _read_uft_rows(dataset, "train")
     val_rows = _read_uft_rows(dataset, "val")
     if len(train_rows) < batch_size:
         raise ValueError(f"StyleTTS2 needs at least {batch_size} training clips for batch size {batch_size}.")
+    if len(val_rows) < batch_size:
+        raise ValueError(f"StyleTTS2 needs at least {batch_size} validation clips for batch size {batch_size}; upstream drops incomplete validation batches.")
+    paths = _validate_runtime(Path(styletts2_repo).expanduser().resolve(), Path(pretrained_checkpoint).expanduser().resolve(), python_executable)
 
     gpu_total_gib = None
     if not dry_run and device != "cpu":
