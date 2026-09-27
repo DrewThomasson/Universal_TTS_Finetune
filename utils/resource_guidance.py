@@ -12,11 +12,11 @@ _GUIDANCE = {
     "xtts_v1": (32, 12, "XTTS CPU training can be exceptionally slow; use short clips and batch size 1."),
     "xtts_v2": (32, 12, "XTTS CPU training can be exceptionally slow; use short clips and batch size 1."),
     "mms_vits": (24, 12, "MMS needs a language-matched base checkpoint."),
-    "styletts2": (24, 12, "Hard CUDA guard: at least 9 GiB free VRAM. Batch size 2. CPU training is unverified."),
-    "omnivoice": (24, 16, "Hard guards: CUDA needs at least 16 GiB total and 12 GiB free VRAM; CPU needs Linux and 16 GiB available RAM; either needs 20 GiB free disk. CPU training is unverified."),
+    "styletts2": (24, 12, "Hard CUDA guard: at least 9 GiB free VRAM. Batch size 2. Short-clip CPU training verified; CPU uses the initial acoustic stage."),
+    "omnivoice": (24, 16, "Hard guards: CUDA needs at least 16 GiB total and 12 GiB free VRAM; CPU needs Linux and 16 GiB available RAM; either needs 20 GiB free disk. Short-clip CPU LoRA training verified."),
     "f5_tts": (24, 12, "Hard guards: CUDA needs at least 9 GiB free VRAM; either device needs 12 GiB free disk. CPU uses full precision; CPU training is unverified."),
 }
-_CPU_STEP_VERIFIED = {"align_tts", "piper"}
+_CPU_STEP_VERIFIED = {"align_tts", "piper", "styletts2", "omnivoice"}
 
 
 def _available_ram_gib() -> float | None:
