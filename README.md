@@ -33,6 +33,7 @@ On Windows, activate with `.venv\Scripts\activate` instead. Open **http://localh
 ## Fine-tune in three steps
 
 1. **Prepare dataset:** Add audio clips and, if you have them, matching transcripts. You can also supply an E2A audiobook with its matching `.vtt` file. Select the dataset language and create the dataset. Without transcripts, `auto` uses Whisper for short language codes (such as `en`) and MMS ASR for published MMS codes (such as `eng`). You can choose either backend explicitly. Exact transcript maps and alignment files bypass ASR. MMS ASR needs a [published adapter](https://huggingface.co/facebook/mms-1b-all) for the selected language; its model is licensed CC BY-NC 4.0.
+   Need text for synthetic clips? See the [multilingual prompt files](https://huggingface.co/drewThomasson/fineTunedTTSModels/tree/main/TTSDistilationDatasets).
 2. **Train model:** Select the dataset, engine, and fine-tuning language. Choose a published **starting checkpoint** when one is available, then start training. XTTS v1/v2 list only their supported languages (14/17); selecting another engine may require training from scratch if no checkpoint is mapped. Piper choices show language, locale, voice, and quality. A ready-to-speak Piper ONNX voice is different from a training checkpoint; UFT does not silently substitute an English checkpoint. MMS/Fairseq VITS uses Meta's published three-letter language codes and requires its matching checkpoint. Those checkpoints carry a CC BY-NC 4.0 license.
 
 The training language list follows each engine: Coqui phoneme models show languages supported by the installed phonemizer, Align TTS currently uses English only, and Piper stops with an error if its selected eSpeak voice is unavailable. For Coqui scratch runs, UFT includes the dataset's phoneme symbols in the model vocabulary; a mapped checkpoint cannot expand its fixed vocabulary and UFT reports an error if the dataset needs extra symbols. A language without a starting checkpoint needs substantially more data and training time.
@@ -68,11 +69,12 @@ OmniVoice LoRA fine-tuning and inference use a separate environment because its 
 
 Completed runs store their LoRA checkpoint, base model, and isolated interpreter in `ready/artifacts.json`. UFT inference loads the adapter through OmniVoice's official LoRA API in that same environment. The language picker contains the IDs from OmniVoice's published catalog; catalog presence represents published coverage, not language-by-language UFT validation. Scratch training, resume from a local checkpoint, and E2A export are unsupported for this adapter.
 
-For CUDA training, use Linux with at least 16 GiB total and 12 GiB free GPU memory. CPU training requires Linux and at least 16 GiB available system RAM; it has not completed a UFT smoke test. The base Docker image does not include OmniVoice's optional environment. For example, install a PyTorch build compatible with your selected device in a separate environment, then:
+For CUDA training, use Linux with at least 16 GiB total and 12 GiB free GPU memory. CPU training requires Linux and at least 16 GiB available system RAM; it has not completed a UFT smoke test. The base Docker image does not include OmniVoice's optional environment. Create a separate uv environment, install PyTorch for your device into it, then install OmniVoice:
 
 ```bash
-/path/to/omni-env/bin/python -m pip install 'git+https://github.com/k2-fsa/OmniVoice.git@08be0b4ccbac3e13e374e86fbfead4b4cac343e2' 'peft>=0.20'
-export UFT_OMNIVOICE_PYTHON=/path/to/omni-env/bin/python
+uv venv --python 3.12 ../omnivoice-env
+uv pip install --python ../omnivoice-env/bin/python 'git+https://github.com/k2-fsa/OmniVoice.git@08be0b4ccbac3e13e374e86fbfead4b4cac343e2' 'peft>=0.20'
+export UFT_OMNIVOICE_PYTHON="$PWD/../omnivoice-env/bin/python"
 ```
 
 Cache `k2-fsa/OmniVoice`, `eustlb/higgs-audio-v2-tokenizer`, and `Qwen/Qwen3-0.6B` in the same Hugging Face cache used by UFT (`UFT_MODELS_DIR`) before training. Keep that cache available for inference; the packaged LoRA adapter needs its base model.
